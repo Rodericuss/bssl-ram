@@ -9,3 +9,8 @@ daemon/target/
 # checking it in would freeze us to one specific kernel and balloon
 # the diff (~3 MB / 160k LOC).
 daemon/src/bpf/vmlinux.h
+
+# Per-host benchmark output. Re-run scripts under bench/scripts/ to
+# regenerate; the .gitkeep marker preserves the directory.
+bench/results/*
+!bench/results/.gitkeep

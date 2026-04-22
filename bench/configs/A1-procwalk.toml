@@ -1,0 +1,18 @@
+# Test A1 — discovery via /proc walk only.
+#
+# Caps deliberately exclude CAP_NET_ADMIN and CAP_BPF/CAP_PERFMON so
+# the cn_proc subscription fails to open and the BPF tracker can't
+# load. The daemon falls back to walking /proc every cycle and to
+# parsing /proc/PID/stat per target — the v0.1.x baseline.
+#
+# Used by scripts/bench-cpu.sh.
+
+scan_interval_secs    = 2
+idle_cycles_threshold = 9999      # huge — never compresses anything
+cpu_delta_threshold   = 2
+wakeup_delta_threshold = 50
+min_rss_mib           = 50
+dry_run               = true      # no syscall churn between rounds
+telemetry_interval_cycles = 0
+psi_enabled           = false
+enable_bpf_cpu_tracker = false

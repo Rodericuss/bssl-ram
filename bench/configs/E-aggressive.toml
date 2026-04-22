@@ -1,0 +1,19 @@
+# Test E — aggressive idle thresholds to stress-test the
+# anti-recompression logic. With idle_cycles_threshold=1 and
+# scan_interval_secs=5 every target gets a compress decision
+# at the first idle cycle, so the dual-threshold guard
+# (cpu_delta vs wakeup_delta) is exercised every 5s.
+#
+# The runner counts total compress events vs unique PIDs over
+# 90s — the ratio collapses from ~30% recompressions in v0.1.x
+# to ~3% in v0.3.0 (only legitimate user-wakeup-then-idle cycles).
+
+scan_interval_secs    = 5
+idle_cycles_threshold = 1
+cpu_delta_threshold   = 2
+wakeup_delta_threshold = 50
+min_rss_mib           = 50
+dry_run               = false
+telemetry_interval_cycles = 0
+psi_enabled           = false
+enable_bpf_cpu_tracker = true

@@ -1,0 +1,16 @@
+# Test A2 — cn_proc table on, BPF off.
+#
+# CAP_NET_ADMIN granted by the runner so the netlink subscription
+# succeeds; CAP_BPF/CAP_PERFMON withheld. Discovery runs from the
+# in-memory table (no /proc walk per cycle), CPU tracking still
+# parses /proc/PID/stat per target — the v0.2.0 baseline.
+
+scan_interval_secs    = 2
+idle_cycles_threshold = 9999
+cpu_delta_threshold   = 2
+wakeup_delta_threshold = 50
+min_rss_mib           = 50
+dry_run               = true
+telemetry_interval_cycles = 0
+psi_enabled           = false
+enable_bpf_cpu_tracker = false
