@@ -59,7 +59,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
-    let tabs = scanner::scan_firefox_tabs();
+    let tabs = scanner::scan_targets(&scanner::default_profiles());
     let target = std::env::args()
         .nth(1)
         .and_then(|s| s.parse::<u32>().ok())

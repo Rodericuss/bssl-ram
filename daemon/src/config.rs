@@ -1,3 +1,4 @@
+use crate::scanner::{default_profiles, BrowserProfile};
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
@@ -23,6 +24,20 @@ pub struct Config {
 
     /// Log what would happen without actually compressing anything.
     pub dry_run: bool,
+
+    /// Browser/app profiles used by the scanner. Each profile is a
+    /// declarative cmdline-match rule. Defaults to a built-in set covering
+    /// Firefox-family + Chromium-family + Electron apps. Users can replace
+    /// or extend the list in `/etc/bssl-ram/config.toml`:
+    ///
+    /// ```toml
+    /// [[profiles]]
+    /// name = "my-app"
+    /// binary_substring_any = ["myapp"]
+    /// arg_required_all = ["--worker"]
+    /// ```
+    #[serde(default = "default_profiles")]
+    pub profiles: Vec<BrowserProfile>,
 }
 
 impl Default for Config {
@@ -33,6 +48,7 @@ impl Default for Config {
             cpu_delta_threshold: 2,
             min_rss_mib: 50,
             dry_run: false,
+            profiles: default_profiles(),
         }
     }
 }

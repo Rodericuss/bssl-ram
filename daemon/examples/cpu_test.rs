@@ -14,8 +14,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() {
-    let tabs = scanner::scan_firefox_tabs();
-    println!("tracking {} tabs", tabs.len());
+    let tabs = scanner::scan_targets(&scanner::default_profiles());
+    println!("tracking {} targets", tabs.len());
 
     let mut prev: HashMap<u32, (u64, u64)> = HashMap::new();
     for t in &tabs {

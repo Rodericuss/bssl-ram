@@ -7,8 +7,9 @@ mod zram;
 use anyhow::Result;
 use compressor::{compress_pid, read_cpu_ticks, rss_mib};
 use config::Config;
-use scanner::scan_firefox_tabs;
+use scanner::scan_targets;
 use state::{CpuTracker, ProcSnapshot};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
@@ -21,6 +22,15 @@ async fn main() -> Result<()> {
     info!(
         "bssl-ram starting — scan every {}s, idle threshold: {} cycles, cpu delta: {} ticks",
         config.scan_interval_secs, config.idle_cycles_threshold, config.cpu_delta_threshold,
+    );
+    info!(
+        "active profiles: {}",
+        config
+            .profiles
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     if config.dry_run {
@@ -55,10 +65,28 @@ async fn main() -> Result<()> {
 /// Pulled out of the main loop so the tokio::select! above can preempt
 /// between cycles on a signal without leaving a scan half-done.
 fn scan_cycle(config: &Config, tracker: &mut CpuTracker) {
-    let tabs = scan_firefox_tabs();
-    info!("found {} Firefox tab processes", tabs.len());
+    let targets = scan_targets(&config.profiles);
 
-    for tab in &tabs {
+    // Per-profile breakdown so the user sees what was matched at a glance
+    let mut by_profile: HashMap<&str, usize> = HashMap::new();
+    for t in &targets {
+        *by_profile.entry(t.profile.as_str()).or_insert(0) += 1;
+    }
+    let summary: Vec<String> = by_profile
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    info!(
+        "found {} target processes ({})",
+        targets.len(),
+        if summary.is_empty() {
+            "—".into()
+        } else {
+            summary.join(" ")
+        },
+    );
+
+    for tab in &targets {
         let pid = tab.pid;
 
         let (utime, stime) = match read_cpu_ticks(pid) {
@@ -80,8 +108,8 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker) {
 
         if cycles < config.idle_cycles_threshold {
             info!(
-                "pid {} idle for {}/{} cycles — waiting",
-                pid, cycles, config.idle_cycles_threshold
+                "[{}] pid {} idle for {}/{} cycles — waiting",
+                tab.profile, pid, cycles, config.idle_cycles_threshold,
             );
             continue;
         }
@@ -90,22 +118,25 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker) {
         // clears this flag the moment the process shows CPU activity again,
         // so a new idle period will be eligible.
         if tracker.is_compressed(pid) {
-            debug!("pid {} already compressed — skipping", pid);
+            debug!(
+                "[{}] pid {} already compressed — skipping",
+                tab.profile, pid
+            );
             continue;
         }
 
         let rss = rss_mib(pid);
         if rss < config.min_rss_mib {
             info!(
-                "pid {} idle but RSS {}MiB < threshold {}MiB — skipping",
-                pid, rss, config.min_rss_mib
+                "[{}] pid {} idle but RSS {}MiB < threshold {}MiB — skipping",
+                tab.profile, pid, rss, config.min_rss_mib,
             );
             continue;
         }
 
         match compress_pid(pid, config.dry_run) {
             Ok(()) => tracker.mark_compressed(pid),
-            Err(e) => warn!("failed to compress pid {}: {}", pid, e),
+            Err(e) => warn!("[{}] failed to compress pid {}: {}", tab.profile, pid, e),
         }
     }
 }

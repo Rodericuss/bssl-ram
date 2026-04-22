@@ -57,8 +57,8 @@ fn main() {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let tabs = scanner::scan_firefox_tabs();
-    println!("found {} tab procs", tabs.len());
+    let tabs = scanner::scan_targets(&scanner::default_profiles());
+    println!("found {} target procs", tabs.len());
 
     // Pick the largest RSS tab as target — most signal to noise
     let target_pid = std::env::args()
@@ -69,7 +69,7 @@ fn main() {
                 .max_by_key(|t| compressor::rss_mib(t.pid))
                 .map(|t| t.pid)
         })
-        .expect("no firefox tabs found");
+        .expect("no target processes found");
 
     println!("\n=== target pid {} ===", target_pid);
     let before = smaps_rollup(target_pid);
