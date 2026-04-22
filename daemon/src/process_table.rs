@@ -16,7 +16,7 @@
 use crate::proc_connector::{ProcConnector, ProcEvent};
 use crate::scanner::{match_profile, parse_cmdline, BrowserProfile, TargetProcess};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -199,6 +199,58 @@ impl ProcessTable {
     /// Number of entries currently in the table — for telemetry.
     pub fn tracked(&self) -> usize {
         self.inner.read().unwrap().len()
+    }
+
+    /// Drift correction: walk /proc once and reconcile against the
+    /// in-memory table. Catches:
+    ///   - phantoms — table entries whose PID no longer exists (we
+    ///     missed an EXIT event because the kernel dropped it under
+    ///     load, or it fell off the truncated SO_RCVBUF queue);
+    ///   - newcomers — matching procs that never showed up in EXEC
+    ///     events (same kind of drop; or they raced with the seed walk
+    ///     at startup).
+    ///
+    /// Returns `(added, dropped)` for the operator's log line. Cheap
+    /// when the table matches /proc — at worst one classify_pid per
+    /// candidate, all done outside the lock.
+    pub fn reseed_drift_correction(&self) -> (usize, usize) {
+        let live_pids: HashSet<u32> = match fs::read_dir("/proc") {
+            Ok(d) => d
+                .flatten()
+                .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+                .collect(),
+            Err(e) => {
+                warn!(err = %e, "drift correction: cannot read /proc");
+                return (0, 0);
+            }
+        };
+
+        let existing_pids: HashSet<u32> = self.inner.read().unwrap().keys().copied().collect();
+
+        let phantoms: Vec<u32> = existing_pids.difference(&live_pids).copied().collect();
+        let candidates: Vec<u32> = live_pids.difference(&existing_pids).copied().collect();
+
+        // Classify outside the write lock so the cn_proc reader thread
+        // is not blocked on /proc/PID/cmdline reads.
+        let mut new_records: Vec<(u32, ProcessRecord)> = Vec::new();
+        for pid in candidates {
+            if let Some(r) = self.classify_pid(pid) {
+                new_records.push((pid, r));
+            }
+        }
+
+        let mut table = self.inner.write().unwrap();
+        let mut dropped = 0usize;
+        for pid in &phantoms {
+            if table.remove(pid).is_some() {
+                dropped += 1;
+            }
+        }
+        let added = new_records.len();
+        for (pid, r) in new_records {
+            table.insert(pid, r);
+        }
+        (added, dropped)
     }
 
     /// Signal the reader thread to exit at its next loop iteration.

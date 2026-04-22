@@ -220,6 +220,46 @@ sudo ./target/debug/examples/compress_real
 
 ---
 
+## 🚀 Push it further — kernel-side free wins
+
+bssl-ram doesn't replace what the kernel already does well; it stacks on top. Two zero-code knobs amplify everything the daemon does.
+
+### MGLRU (Multi-Generational LRU) — better aging, less kswapd
+
+Linux 6.1+ ships an alternative page-reclaim algorithm that uses generations instead of the binary active/inactive lists. Google's fleet data: **40% less kswapd CPU, 85% fewer low-memory kills at the 75th percentile**. It's compiled in but disabled by default on most distros.
+
+```bash
+# Enable all three components (base + leaf-PTE + non-leaf-PTE access bit clearing)
+echo y | sudo tee /sys/kernel/mm/lru_gen/enabled
+
+# Anti-thrashing TTL — protects working set from premature eviction
+echo 1000 | sudo tee /sys/kernel/mm/lru_gen/min_ttl_ms
+
+# Confirm
+cat /sys/kernel/mm/lru_gen/enabled    # should print 0x0007
+```
+
+Persist across boots via a systemd-tmpfiles drop-in or sysfs.d snippet. Reference: [`Documentation/admin-guide/mm/multigen_lru.rst`](https://docs.kernel.org/admin-guide/mm/multigen_lru.html).
+
+### zram multi-algorithm + recompression — squeeze the last drops
+
+Default zram uses one fast algorithm (zstd or lz4). You can stack a fast primary for write latency with a slow-but-strong secondary for already-cold pages — typical result is **4–5× compression ratio** instead of the usual 2–3×.
+
+```ini
+# /etc/systemd/zram-generator.conf
+[zram0]
+zram-size = ram
+compression-algorithm = lzo-rle zstd(level=15)
+# Optional: spill the genuinely incompressible pages to a raw partition
+# writeback-device = /dev/disk/by-id/<your-nvme>-partN
+```
+
+Then a tiny script re-compresses idle pages with the secondary algorithm in the background. Reference: [systemd-zram-generator multi-comp recipe](https://gist.github.com/Szpadel/9a1960e52121e798a240a9b320ec13c8) and [`Documentation/admin-guide/blockdev/zram.rst`](https://docs.kernel.org/admin-guide/blockdev/zram.html).
+
+These two changes together stretch the daemon's per-page payoff: you compress more bytes per RAM byte saved, evicted pages stay accurate to the actual working set, and the kernel does less hot-path work to keep up.
+
+---
+
 ## 🧯 Known limitations
 
 - **No per-tab granularity.** Browsers group same-site tabs into one process (Fission in Firefox, site-per-process in

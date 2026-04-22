@@ -69,6 +69,15 @@ pub struct Config {
     #[serde(default = "default_psi_window_us")]
     pub psi_window_us: u64,
 
+    /// Drift correction interval for the cn_proc-driven process table.
+    /// Every N scan cycles, the table is reconciled against a fresh
+    /// /proc walk so any events the kernel dropped (under fork storm,
+    /// SO_RCVBUF saturation, …) get caught up. Set to 0 to disable
+    /// (dangerous on long uptimes — drift accumulates). Default 10 ⇒
+    /// reseed every 10 cycles ≈ every 100s at the default scan_interval.
+    #[serde(default = "default_cn_proc_reseed")]
+    pub cn_proc_reseed_every_n_cycles: u64,
+
     /// Browser/app profiles used by the scanner. Each profile is a
     /// declarative cmdline-match rule. Defaults to a built-in set covering
     /// Firefox-family + Chromium-family + Electron apps. Users can replace
@@ -97,6 +106,7 @@ impl Default for Config {
             psi_enabled: default_psi_enabled(),
             psi_stall_threshold_us: default_psi_stall_us(),
             psi_window_us: default_psi_window_us(),
+            cn_proc_reseed_every_n_cycles: default_cn_proc_reseed(),
             profiles: default_profiles(),
         }
     }
@@ -116,6 +126,10 @@ fn default_psi_stall_us() -> u64 {
 
 fn default_psi_window_us() -> u64 {
     1_000_000
+}
+
+fn default_cn_proc_reseed() -> u64 {
+    10
 }
 
 impl Config {

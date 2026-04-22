@@ -115,6 +115,26 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(config.scan_interval_secs)) => {
                 cycle += 1;
+
+                // Periodic drift correction: walk /proc and reconcile
+                // the cn_proc-maintained table. Catches any FORK/EXEC/EXIT
+                // the kernel dropped (under fork storm, SO_RCVBUF saturation).
+                if let Some(t) = &process_table {
+                    if config.cn_proc_reseed_every_n_cycles > 0
+                        && cycle.is_multiple_of(config.cn_proc_reseed_every_n_cycles)
+                    {
+                        let (added, dropped) = t.reseed_drift_correction();
+                        if added + dropped > 0 {
+                            info!(
+                                added,
+                                dropped,
+                                tracked = t.tracked(),
+                                "process table drift correction"
+                            );
+                        }
+                    }
+                }
+
                 let targets = collect_targets(&process_table, &config);
                 scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets);
 
