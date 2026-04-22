@@ -4,7 +4,9 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.94+-ce422b?style=for-the-badge&logo=rust&logoColor=fff)](https://www.rust-lang.org/)
 [![Linux](https://img.shields.io/badge/Linux_5.10+-000?style=for-the-badge&logo=linux&logoColor=ff7139)](https://kernel.org/)
-[![Firefox](https://img.shields.io/badge/Firefox-any-ff7139?style=for-the-badge&logo=firefox&logoColor=fff)](https://www.mozilla.org/firefox/)
+[![Firefox](https://img.shields.io/badge/Firefox-family-ff7139?style=for-the-badge&logo=firefox&logoColor=fff)](https://www.mozilla.org/firefox/)
+[![Chromium](https://img.shields.io/badge/Chromium-family-4285f4?style=for-the-badge&logo=googlechrome&logoColor=fff)](https://www.chromium.org/)
+[![Electron](https://img.shields.io/badge/Electron-apps-47848f?style=for-the-badge&logo=electron&logoColor=fff)](https://www.electronjs.org/)
 [![zram](https://img.shields.io/badge/zram-zstd-6e4a7e?style=for-the-badge)](https://wiki.archlinux.org/title/Zram)
 [![License](https://img.shields.io/badge/license-MIT-0f3460?style=for-the-badge)](./LICENSE)
 
@@ -12,15 +14,15 @@
 
 ---
 
-*"Firefox asks for RAM. The kernel delivers. bssl-ram whispers to the kernel."*
+*"Browsers ask for RAM. The kernel delivers. bssl-ram whispers to the kernel."*
 
 </div>
 
 ---
 
 > [!IMPORTANT]
-> **bssl-ram is a tiny autonomous daemon that shrinks idle Firefox tabs by ~70% RSS without Firefox noticing.**
-> It doesn't restart tabs, doesn't discard, doesn't reload. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back, the kernel decompresses transparently on page fault. Firefox never learns this happened.
+> **bssl-ram is a tiny autonomous daemon that shrinks idle browser tabs and Electron windows by ~70% RSS without the app noticing.**
+> Out of the box it covers Firefox, LibreWolf, Zen, Waterfox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Discord, Slack, VS Code, Spotify, Obsidian and basically any other Electron-based desktop app. It doesn't restart, discard, or reload anything. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back, the kernel decompresses transparently on page fault. The app never learns this happened.
 
 ---
 
@@ -81,7 +83,7 @@ dry_run = true
 }}}%%
 flowchart LR
     subgraph Scan["🔎 every 10s"]
-        PROC["/proc/*/cmdline<br/>find -isForBrowser ... tab"]
+        PROC["/proc/*/cmdline<br/>match browser + electron profiles"]
         STAT["/proc/PID/stat<br/>utime + stime delta"]
     end
 
@@ -106,11 +108,11 @@ flowchart LR
 
 The daemon is a single Tokio loop. Every `scan_interval_secs` it:
 
-1. Walks `/proc` looking for processes whose cmdline contains `-isForBrowser` and ends in `tab` — these are Firefox content processes hosting browser tabs (not rdd, utility, socket, gpu, or forkserver).
-2. Reads `utime + stime` from `/proc/PID/stat` and diffs against the previous snapshot. Tabs that burn ≤ 2 ticks (20ms CPU) per cycle for 3 consecutive cycles are flagged idle.
-3. Parses `/proc/PID/smaps`, selects only **private anonymous** regions (perms `p`, inode 0, `Anonymous: > 0 kB`), and calls `process_madvise(pidfd, iov, MADV_PAGEOUT)` on each.
+1. Walks `/proc` and matches each cmdline against the configured **profiles**. Firefox tabs use `-isForBrowser ... tab`; everything Chromium-based (Chrome, Brave, Edge, Vivaldi, Opera, *and* every Electron app) carries `--type=renderer`. Extension renderers (`--extension-process`) and infrastructure procs (gpu/utility/zygote/crashpad/rdd/socket) are excluded.
+2. Reads `utime + stime` from `/proc/PID/stat` and diffs against the previous snapshot. Targets that burn ≤ 2 ticks (20ms CPU) per cycle for 3 consecutive cycles are flagged idle.
+3. Parses `/proc/PID/smaps`, selects only **private anonymous** regions (perms `p`, inode 0, `Anonymous: > 0 kB`), and batches them through `process_madvise(pidfd, iov, MADV_PAGEOUT)` in chunks of `IOV_MAX=1024`.
 
-That's the whole thing. No ptrace, no signals, no process suspension. The kernel handles decompression on demand — Firefox doesn't know its pages moved.
+That's the whole thing. No ptrace, no signals, no process suspension. The kernel handles decompression on demand — the app doesn't know its pages moved.
 
 ---
 
@@ -139,7 +141,26 @@ idle_cycles_threshold = 3    # consecutive idle cycles before compressing (3 × 
 cpu_delta_threshold   = 2    # CPU ticks per cycle to be considered idle (2 ticks = 20ms)
 min_rss_mib           = 50   # don't bother compressing tiny processes
 dry_run               = false
+
+# Profiles are how the scanner decides what counts as a "compressible
+# target". The defaults below cover Firefox-family + Chromium-family +
+# every Electron app — you only need this section if you want to add new
+# match rules or replace the defaults.
+#
+# [[profiles]]
+# name = "my-app"
+# binary_substring_any = ["myapp"]   # case-insensitive substrings of argv[0]
+# arg_required_all     = ["--worker"]
+# arg_excluded_any     = ["--debug"]
+# arg_last             = "tab"
 ```
+
+### Supported apps (built-in profiles)
+
+| Profile | Matches |
+|:---|:---|
+| `firefox` | Firefox, LibreWolf, Zen Browser, Waterfox, IceCat — any tab content process (`-isForBrowser ... tab`) |
+| `chromium` | Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Yandex, Thorium, **and every Electron app** (VS Code, Discord, Slack, Spotify, Obsidian, Signal, Notion, Element, Teams, Vesktop, …) — any `--type=renderer` content process. Extension renderers (`--extension-process`) are excluded. |
 
 ---
 
@@ -170,16 +191,16 @@ sudo ./target/debug/examples/compress_real
 | Linux kernel ≥ 5.10 | `process_madvise` and `pidfd_open` syscalls |
 | zram configured as swap | Without it, pages go to disk — defeats the point |
 | `CAP_SYS_NICE` + `CAP_SYS_PTRACE` | Granted by the systemd unit or via `setcap` — no permanent root |
-| Firefox | Any recent version |
+| At least one supported app | Firefox, any Chromium-based browser, or any Electron app (see profile table above) |
 
 ---
 
 ## 🧯 Known limitations
 
-- **No per-tab granularity.** Firefox's Fission keeps tabs from the same site in the same content process — compressing one compresses all siblings. Acceptable since they'll all idle together.
-- **Background media detection.** A tab playing audio through MSE may show low CPU delta because the actual decoding happens in the `rdd` process. Future work: a D-Bus MPRIS listener to globally block compression during `PlaybackStatus=Playing`.
+- **No per-tab granularity.** Browsers group same-site tabs into one process (Fission in Firefox, site-per-process in Chromium) — compressing one compresses all siblings. Acceptable since they'll all idle together.
+- **Background media detection.** A tab playing audio through MSE may show low CPU delta because the actual decoding happens in a sibling decoder process. Future work: a D-Bus MPRIS listener to globally block compression during `PlaybackStatus=Playing`.
 - **WebRTC / Meet / Zoom.** These rarely expose `MediaSession`, so MPRIS won't help. Future work: a minimal Native Messaging Host as a cooperative "please don't compress" signal from the page.
-- **Cold-start latency.** The first access after compression pays a page-fault roundtrip plus zstd decompression (sub-100ms for typical tab working sets — noticeable but not painful).
+- **Cold-start latency.** The first access after compression pays a page-fault roundtrip plus zstd decompression (sub-100ms for typical working sets — noticeable but not painful).
 
 ---
 
