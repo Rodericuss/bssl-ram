@@ -134,17 +134,17 @@ light backgrounds) that drops straight into the project README via a
 
 > [!WARNING]
 > - **Capability prompts** — scripts call `sudo setcap` and `sudo cp`
-    > and will prompt for the password. Read each before running if you
-    > prefer to grant manually.
+>   and will prompt for the password. Read each before running if you
+>   prefer to grant manually.
 > - **Live workload variance** — results vary 10–30% across runs
-    > because the underlying browser activity is uncontrolled. Run each
-    > test several times for a tight confidence interval.
+>   because the underlying browser activity is uncontrolled. Run each
+>   test several times for a tight confidence interval.
 > - **Memory-pressure test (B)** allocates 14 GiB in a child Python
-    > process. On a 16 GiB box without swap this can trigger the OOM
-    > killer — edit the allocation size in the script if your box is
-    > smaller.
+>   process. On a 16 GiB box without swap this can trigger the OOM
+>   killer — edit the allocation size in the script if your box is
+>   smaller.
 > - **Real compression test (C)** actually pages out memory. Run it on
-    > a tab you don't mind being briefly paused on next access.
+>   a tab you don't mind being briefly paused on next access.
 
 ---
 
