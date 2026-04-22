@@ -32,21 +32,17 @@ const CONTENT_TTL_MS = 30_000;
 const STORAGE_KEY_TAB_SIGNALS = "tabSignals";
 const STORAGE_KEY_INSTANCE_ID = "instanceId";
 const STORAGE_KEY_LAST_FAILURE_AT = "lastFailureAt";
-const STORAGE_KEY_ENDPOINT_INDEX = "lastEndpointIndex";
 
 // Identifier for the rich-signals content script. Only registered when
 // the user has granted `<all_urls>` at the options page. Without it we
 // still deliver coarse signals (tab.audible, tab.active, window.focused).
 const RICH_SCRIPT_ID = "bssl-ram-rich-signals";
 
-const SIGNAL_ENDPOINTS = [
-  "http://127.0.0.1:7879/v1/signals/report",
-  "http://localhost:7879/v1/signals/report",
-  "http://[::1]:7879/v1/signals/report"
-];
-const PING_ENDPOINTS = SIGNAL_ENDPOINTS.map((url) =>
-  url.replace("/report", "/ping")
-);
+// Name the browser uses to look up the NMH manifest `io.bssl.ram.json`
+// under `~/.config/<browser>/NativeMessagingHosts/` or
+// `~/.mozilla/native-messaging-hosts/`. Must match what
+// `bssl-ram-bridge install` writes.
+const NMH_HOST = "io.bssl.ram";
 
 // ---------------------------------------------------------------------------
 // Persistent state helpers
@@ -258,41 +254,76 @@ async function queryIdleState() {
 }
 
 // ---------------------------------------------------------------------------
-// Transport
+// Transport — Native Messaging Host (`bssl-ram-bridge`)
 // ---------------------------------------------------------------------------
+//
+// The SW holds a single long-lived port into the NMH. When the port
+// disconnects (SW hibernation, bridge exit, daemon unreachable at
+// spawn time), the next send reconnects. In-flight requests are
+// tracked in FIFO order — the NMH wire is one-in, one-out per port,
+// so we can match replies by arrival order.
+
+let _nativePort = null;
+let _pendingResolvers = [];
+
+function openNativePort() {
+  try {
+    const port = api.runtime.connectNative(NMH_HOST);
+    port.onMessage.addListener((msg) => {
+      const resolver = _pendingResolvers.shift();
+      if (resolver) resolver.resolve(msg);
+    });
+    port.onDisconnect.addListener(() => {
+      const err =
+        api.runtime.lastError?.message ?? "bridge disconnected";
+      _nativePort = null;
+      for (const r of _pendingResolvers) r.reject(new Error(err));
+      _pendingResolvers = [];
+    });
+    return port;
+  } catch (err) {
+    console.warn("bssl-ram signals: connectNative threw", err);
+    return null;
+  }
+}
+
+function getNativePort() {
+  if (_nativePort) return _nativePort;
+  _nativePort = openNativePort();
+  return _nativePort;
+}
+
+function sendNative(msg) {
+  return new Promise((resolve, reject) => {
+    const port = getNativePort();
+    if (!port) {
+      reject(new Error("native messaging host unavailable"));
+      return;
+    }
+    _pendingResolvers.push({ resolve, reject });
+    try {
+      port.postMessage(msg);
+    } catch (err) {
+      _pendingResolvers = _pendingResolvers.filter((r) => r.resolve !== resolve);
+      reject(err);
+    }
+  });
+}
 
 async function postToDaemon(report) {
-  const serialized = JSON.stringify(report);
-  const stored = await api.storage.session.get(STORAGE_KEY_ENDPOINT_INDEX);
-  const startIndex = Number.isFinite(stored?.[STORAGE_KEY_ENDPOINT_INDEX])
-    ? stored[STORAGE_KEY_ENDPOINT_INDEX]
-    : 0;
-
-  for (let offset = 0; offset < SIGNAL_ENDPOINTS.length; offset += 1) {
-    const index = (startIndex + offset) % SIGNAL_ENDPOINTS.length;
-    const endpoint = SIGNAL_ENDPOINTS[index];
-
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-bssl-signal-source": "extension"
-        },
-        body: serialized
-      });
-
-      if (response.ok) {
-        await api.storage.session.set({ [STORAGE_KEY_ENDPOINT_INDEX]: index });
-        return true;
-      }
-    } catch (_) {
-      // try the next endpoint
+  try {
+    const resp = await sendNative({ kind: "report", payload: report });
+    if (!resp?.ok) {
+      await noteFailure(
+        `bssl-ram signals: bridge returned ${JSON.stringify(resp)}`
+      );
+      return false;
     }
+    return true;
+  } catch (err) {
+    await noteFailure(`bssl-ram signals: ${err.message}`);
+    return false;
   }
-
-  await noteFailure("bssl-ram signals: local daemon endpoint unavailable");
-  return false;
 }
 
 async function noteFailure(msg) {
@@ -308,23 +339,22 @@ async function noteFailure(msg) {
 }
 
 async function pingDaemon() {
-  for (const endpoint of PING_ENDPOINTS) {
-    try {
-      const response = await fetch(endpoint, { method: "GET" });
-      if (!response.ok) continue;
-      const body = await response.json();
-      if (Number(body?.protocol_version) !== DAEMON_PROTOCOL_VERSION) {
-        console.warn(
-          `bssl-ram signals: daemon advertises protocol v${body?.protocol_version}, ` +
-            `extension expects v${DAEMON_PROTOCOL_VERSION}`
-        );
-      }
-      return body;
-    } catch (_) {
-      /* try next */
+  try {
+    const body = await sendNative({ kind: "ping" });
+    if (
+      body &&
+      Number(body.protocol_version) !== DAEMON_PROTOCOL_VERSION &&
+      body.ok !== false
+    ) {
+      console.warn(
+        `bssl-ram signals: daemon advertises protocol v${body.protocol_version}, ` +
+          `extension expects v${DAEMON_PROTOCOL_VERSION}`
+      );
     }
+    return body;
+  } catch (_) {
+    return null;
   }
-  return null;
 }
 
 async function sendReport() {

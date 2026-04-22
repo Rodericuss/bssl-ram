@@ -39,19 +39,32 @@ unregisters it.
 
 ## Transport (protocol v1)
 
-Loopback HTTP, JSON, single endpoint per browser session.
+Native Messaging Host + Unix domain socket. No HTTP, no network
+sockets, no `host_permissions`.
 
-- `GET  http://127.0.0.1:7879/v1/signals/ping` → handshake.
-  Extension calls this on startup to verify `protocol_version` matches.
-- `POST http://127.0.0.1:7879/v1/signals/report` → report body (see
-  below). Requires header `x-bssl-signal-source: extension`.
-- Two additional fallback endpoints are tried in order on error:
-  `http://localhost:7879/...`, `http://[::1]:7879/...`.
+```
+extension ──(chrome.runtime.connectNative("io.bssl.ram"))──▶ bssl-ram-bridge
+                                                                  │
+                                                                  ▼
+                                                        /run/bssl-ram/signals.sock
+                                                                  │
+                                                                  ▼
+                                                            bssl-ramd (axum)
+```
 
-All endpoints are loopback; the daemon rejects anything else. The
-`x-bssl-signal-source` header is a marker, not an authenticator —
-real cryptographic auth lands with the native-messaging + Unix-socket
-transition. See the project `SECURITY.md`.
+- The extension calls `chrome.runtime.connectNative("io.bssl.ram")`.
+  The browser looks up `io.bssl.ram.json` under
+  `~/.config/<browser>/NativeMessagingHosts/` (or
+  `~/.mozilla/native-messaging-hosts/`), spawns the bridge binary
+  with a stdio pipe, and passes the extension origin as `argv[1]`.
+- The bridge forwards framed `{kind:"ping"}` and
+  `{kind:"report",payload:...}` messages to the daemon over a Unix
+  socket (`/run/bssl-ram/signals.sock` by default). Daemon UID
+  check (`SO_PEERCRED`) is the real trust boundary.
+- Replies come back through the same pipe to the extension.
+
+See [`../INSTALL.md`](../INSTALL.md) for the install flow
+(`bssl-ram-bridge install --user --chrome-ext-id <id>`).
 
 ## Report shape (v1)
 
@@ -154,8 +167,8 @@ Specifically:
 
 Required (baseline):
 
-- `tabs`, `windows`, `idle`, `alarms`, `storage`, `scripting`.
-- `host_permissions` for the three loopback daemon URLs.
+- `tabs`, `windows`, `idle`, `alarms`, `storage`, `scripting`,
+  `nativeMessaging`.
 
 Optional (rich mode only):
 
@@ -164,38 +177,32 @@ Optional (rich mode only):
 
 Explicitly *not* asked for:
 
-- `nativeMessaging` (coming with the NMH+UDS transition, still v1 HTTP
-  here).
+- Any `host_permissions` at all — the extension no longer speaks HTTP.
 - `webRequest`, `webNavigation`, `downloads`, `history`, `bookmarks`,
   `cookies`, anything that touches user data.
 
 ## Local testing
 
-Firefox 121+:
-
-1. Open `about:debugging#/runtime/this-firefox`.
-2. Load Temporary Add-on → pick `manifest.json`.
-
-Chromium 121+:
-
-1. Open `chrome://extensions`, enable Developer Mode.
-2. Load unpacked → pick the `extension/` directory.
-
-Run the daemon with the signals server on:
-
-```toml
-# /etc/bssl-ram/config.toml
-signal_server_enabled = true
-signal_server_bind = "127.0.0.1:7879"
-```
-
-Then watch it:
+See [`../INSTALL.md`](../INSTALL.md) for the complete install flow.
+Short version:
 
 ```bash
-journalctl -u bssl-ram@$USER -f | grep -E "signal|browser"
+# build daemon + bridge
+cargo build --release --workspace
+sudo install -Dm755 target/release/bssl-ram /usr/local/bin/bssl-ram
+sudo install -Dm755 target/release/bssl-ram-bridge /usr/local/bin/bssl-ram-bridge
+
+# start daemon (signal_server_enabled = true in /etc/bssl-ram/config.toml)
+sudo systemctl enable --now bssl-ram@$USER
+
+# write NMH manifests
+bssl-ram-bridge install --user --chrome-ext-id <id-after-loading-unpacked>
 ```
 
-The extension's options page shows whether the daemon is reachable.
+Then load the extension at `about:debugging` (Firefox) or
+`chrome://extensions` (Chromium) and open the Options page — status
+should show *reachable*.
+
 If the daemon isn't running, report delivery fails silently — the
 daemon will never force-compress on absence of data, so the feature
 degrades safely to `/proc`-only heuristics.

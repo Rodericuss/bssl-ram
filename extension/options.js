@@ -1,16 +1,14 @@
-// bssl-ram signals — options page script
+// bssl-ram signals — options page
 //
-// Pure read-only dashboard: queries the daemon's `/v1/signals/ping`
-// endpoint (same candidate endpoints the background SW uses), shows the
-// extension's instance ID, and exposes the last transport failure.
+// Pure read-only dashboard. Talks to the daemon exclusively through
+// the `bssl-ram-bridge` native messaging host — never opens any
+// network socket of its own. If the bridge / daemon is down, the
+// status card shows it in red and the page stays functional for
+// everything else.
 
 const api = globalThis.browser ?? globalThis.chrome;
 
-const PING_ENDPOINTS = [
-  "http://127.0.0.1:7879/v1/signals/ping",
-  "http://localhost:7879/v1/signals/ping",
-  "http://[::1]:7879/v1/signals/ping"
-];
+const NMH_HOST = "io.bssl.ram";
 const EXPECTED_PROTOCOL_VERSION = 1;
 const STORAGE_KEY_INSTANCE_ID = "instanceId";
 const STORAGE_KEY_LAST_FAILURE_AT = "lastFailureAt";
@@ -48,53 +46,89 @@ function setStatus(el, kind, text) {
   el.append(dot, document.createTextNode(text));
 }
 
+/**
+ * One-shot NMH ping. We open a fresh port, send `{kind:"ping"}`, wait
+ * for the single reply, then disconnect. Avoids tangling with the
+ * background SW's long-lived port.
+ */
+function pingViaBridge() {
+  return new Promise((resolve, reject) => {
+    let port;
+    try {
+      port = api.runtime.connectNative(NMH_HOST);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { port.disconnect(); } catch (_) {}
+      reject(new Error("bridge timed out"));
+    }, 3_000);
+    port.onMessage.addListener((msg) => {
+      clearTimeout(timer);
+      try { port.disconnect(); } catch (_) {}
+      resolve(msg);
+    });
+    port.onDisconnect.addListener(() => {
+      clearTimeout(timer);
+      const err = api.runtime.lastError?.message ?? "bridge disconnected";
+      reject(new Error(err));
+    });
+    port.postMessage({ kind: "ping" });
+  });
+}
+
 async function checkDaemon() {
   const status = document.getElementById("daemon-status");
   const proto = document.getElementById("daemon-protocol");
   const fams = document.getElementById("daemon-families");
   const lim = document.getElementById("daemon-limit");
   const endpointEl = document.getElementById("daemon-endpoint");
+  const bridgeEl = document.getElementById("daemon-bridge");
 
   setStatus(status, "", "checking…");
-
-  for (const endpoint of PING_ENDPOINTS) {
-    try {
-      const response = await fetch(endpoint, { method: "GET" });
-      if (!response.ok) continue;
-      const body = await response.json();
-      const protocol = Number(body?.protocol_version);
-      const families = Array.isArray(body?.accepted_families)
-        ? body.accepted_families.join(", ")
-        : "?";
-      const limit = Number.isFinite(body?.max_report_bytes)
-        ? `${Math.round(body.max_report_bytes / 1024)} KiB`
-        : "?";
-
-      endpointEl.textContent = endpoint;
-      proto.textContent = `v${protocol}`;
-      fams.textContent = families;
-      lim.textContent = limit;
-
-      if (protocol === EXPECTED_PROTOCOL_VERSION) {
-        setStatus(status, "ok", "reachable");
-      } else {
-        setStatus(
-          status,
-          "warn",
-          `protocol mismatch — extension expects v${EXPECTED_PROTOCOL_VERSION}`
-        );
-      }
-      return;
-    } catch (_) {
-      /* try next */
-    }
-  }
-
-  setStatus(status, "err", "daemon unreachable on all loopback endpoints");
-  endpointEl.textContent = "—";
   proto.textContent = "—";
   fams.textContent = "—";
   lim.textContent = "—";
+  endpointEl.textContent = "—";
+  if (bridgeEl) bridgeEl.textContent = "—";
+
+  try {
+    const body = await pingViaBridge();
+
+    if (body?.ok === false) {
+      setStatus(status, "err", body.reason ?? "bridge error");
+      return;
+    }
+
+    const protocol = Number(body?.protocol_version);
+    const families = Array.isArray(body?.accepted_families)
+      ? body.accepted_families.join(", ")
+      : "?";
+    const limit = Number.isFinite(body?.max_report_bytes)
+      ? `${Math.round(body.max_report_bytes / 1024)} KiB`
+      : "?";
+
+    endpointEl.textContent = body?.bridge_kind ?? "native-messaging";
+    proto.textContent = `v${protocol}`;
+    fams.textContent = families;
+    lim.textContent = limit;
+    if (bridgeEl) {
+      bridgeEl.textContent = body?.bridge_version ?? "—";
+    }
+
+    if (protocol === EXPECTED_PROTOCOL_VERSION) {
+      setStatus(status, "ok", "reachable");
+    } else {
+      setStatus(
+        status,
+        "warn",
+        `protocol mismatch — extension expects v${EXPECTED_PROTOCOL_VERSION}`
+      );
+    }
+  } catch (err) {
+    setStatus(status, "err", err.message ?? "bridge unavailable");
+  }
 }
 
 async function hasRichPermission() {
@@ -124,10 +158,6 @@ async function toggleRichPermission() {
     if (granted) {
       await api.permissions.remove({ origins: ["<all_urls>"] });
     } else {
-      // `permissions.request` must be called directly from a user
-      // gesture (click handler) — anything async between the click and
-      // the call will silently fail on Chromium. We keep the await
-      // chain minimal above for that reason.
       await api.permissions.request({ origins: ["<all_urls>"] });
     }
   } catch (err) {
