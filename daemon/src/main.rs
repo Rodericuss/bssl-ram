@@ -39,7 +39,12 @@ async fn main() -> Result<()> {
         telemetry_interval_cycles = config.telemetry_interval_cycles,
         dry_run = config.dry_run,
         signal_server_enabled = config.signal_server_enabled,
-        signal_server_bind = %config.signal_server_bind,
+        signal_transport = %config.signal_transport,
+        signal_target = %if config.signal_transport == "uds" {
+            config.signal_uds_path.as_str()
+        } else {
+            config.signal_server_bind.as_str()
+        },
         "bssl-ram starting"
     );
     info!(
@@ -136,8 +141,14 @@ async fn main() -> Result<()> {
     };
 
     let signal_store = if config.signal_server_enabled {
+        let target = if config.signal_transport == "uds" {
+            &config.signal_uds_path
+        } else {
+            &config.signal_server_bind
+        };
         match signals::spawn_server(
-            &config.signal_server_bind,
+            &config.signal_transport,
+            target,
             Duration::from_secs(config.signal_ttl_secs),
             Duration::from_secs(config.signal_interaction_grace_secs),
         )
@@ -145,7 +156,8 @@ async fn main() -> Result<()> {
         {
             Ok(store) => {
                 info!(
-                    bind = %config.signal_server_bind,
+                    transport = %config.signal_transport,
+                    target = %target,
                     ttl_secs = config.signal_ttl_secs,
                     interaction_grace_secs = config.signal_interaction_grace_secs,
                     "browser signal server active"
@@ -155,7 +167,8 @@ async fn main() -> Result<()> {
             Err(e) => {
                 warn!(
                     err = %e,
-                    bind = %config.signal_server_bind,
+                    transport = %config.signal_transport,
+                    target = %target,
                     "browser signal server unavailable — staying on /proc-only heuristics",
                 );
                 None

@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperAutoBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tower::Service;
 use tracing::{debug, info, warn};
 
 const SOURCE_HEADER: &str = "x-bssl-signal-source";
@@ -41,6 +45,21 @@ struct CachedReport {
     report: BrowserSignalsReport,
 }
 
+/// Owns the socket file path so that on daemon shutdown (the last
+/// `Arc<SignalStore>` being dropped) we unlink it. systemd
+/// `RuntimeDirectory=` already handles the happy path; this catches
+/// `cargo run` and `SIGTERM` from outside the unit.
+#[derive(Debug)]
+struct SocketCleanup {
+    path: std::path::PathBuf,
+}
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 // Intentionally not `Default` — a zero-Duration TTL would make every
 // report look stale immediately and silently neuter the feature.
 // Construct explicitly via `SignalStore::new(ttl, interaction_grace)`.
@@ -49,6 +68,9 @@ pub struct SignalStore {
     ttl: Duration,
     interaction_grace: Duration,
     reports: RwLock<HashMap<String, CachedReport>>,
+    // Held for the lifetime of the store so `Drop` unlinks the UDS
+    // socket file on daemon shutdown. `None` for TCP transport.
+    _socket_cleanup: Option<SocketCleanup>,
 }
 
 impl SignalStore {
@@ -57,7 +79,13 @@ impl SignalStore {
             ttl,
             interaction_grace,
             reports: RwLock::new(HashMap::new()),
+            _socket_cleanup: None,
         }
+    }
+
+    fn with_cleanup(mut self, path: std::path::PathBuf) -> Self {
+        self._socket_cleanup = Some(SocketCleanup { path });
+        self
     }
 
     fn apply_report(&self, report: BrowserSignalsReport) -> Result<()> {
@@ -177,7 +205,45 @@ impl SignalStore {
     }
 }
 
+/// Marker inserted into the request extensions telling `report_handler`
+/// whether the `x-bssl-signal-source` header check should apply. On UDS
+/// the `SO_PEERCRED` uid assertion is the real trust boundary; the
+/// header check is meaningful only on TCP (defense-in-depth marker).
+#[derive(Clone, Copy)]
+struct TransportKind {
+    requires_source_header: bool,
+}
+
+fn build_router(store: Arc<SignalStore>, requires_source_header: bool) -> Router {
+    Router::new()
+        .route("/v1/signals/ping", get(ping_handler))
+        .route("/v1/signals/report", post(report_handler))
+        .layer(DefaultBodyLimit::max(MAX_REPORT_BYTES))
+        .layer(Extension(TransportKind {
+            requires_source_header,
+        }))
+        .with_state(store)
+}
+
+/// Dispatcher. `transport` = "uds" (default) | "tcp". `target` is the
+/// socket path for UDS, the `host:port` bind for TCP.
 pub async fn spawn_server(
+    transport: &str,
+    target: &str,
+    ttl: Duration,
+    interaction_grace: Duration,
+) -> Result<Arc<SignalStore>> {
+    match transport {
+        "uds" => spawn_uds_server(target, ttl, interaction_grace).await,
+        "tcp" => spawn_tcp_server(target, ttl, interaction_grace).await,
+        other => anyhow::bail!(
+            "unknown signal_transport {:?} (expected \"uds\" or \"tcp\")",
+            other
+        ),
+    }
+}
+
+async fn spawn_tcp_server(
     bind: &str,
     ttl: Duration,
     interaction_grace: Duration,
@@ -190,11 +256,7 @@ pub async fn spawn_server(
         .with_context(|| format!("binding browser signal server to {}", bind))?;
 
     let store = Arc::new(SignalStore::new(ttl, interaction_grace));
-    let router = Router::new()
-        .route("/v1/signals/ping", get(ping_handler))
-        .route("/v1/signals/report", post(report_handler))
-        .layer(DefaultBodyLimit::max(MAX_REPORT_BYTES))
-        .with_state(store.clone());
+    let router = build_router(store.clone(), /* requires_source_header = */ true);
 
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, router).await {
@@ -202,6 +264,87 @@ pub async fn spawn_server(
         }
     });
 
+    info!(bind, "browser signal server bound (tcp)");
+    Ok(store)
+}
+
+async fn spawn_uds_server(
+    sock_path: &str,
+    ttl: Duration,
+    interaction_grace: Duration,
+) -> Result<Arc<SignalStore>> {
+    // Remove any stale socket from a previous run that did not clean up
+    // (crash, SIGKILL, systemd without RuntimeDirectory). `UnixListener::bind`
+    // returns EADDRINUSE otherwise.
+    let _ = std::fs::remove_file(sock_path);
+
+    let listener = tokio::net::UnixListener::bind(sock_path)
+        .with_context(|| format!("binding signal UDS at {}", sock_path))?;
+
+    // Chmod immediately after bind — axum/hyper-util does not do this,
+    // and a stray 0755 socket would leak the surface to any local user.
+    std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod 0600 {}", sock_path))?;
+
+    let store = Arc::new(
+        SignalStore::new(ttl, interaction_grace).with_cleanup(std::path::PathBuf::from(sock_path)),
+    );
+    let router = build_router(store.clone(), /* requires_source_header = */ false);
+    let our_uid: u32 = unsafe { libc::geteuid() };
+
+    let sock_display = sock_path.to_string();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _addr) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(err) => {
+                    warn!(err = %err, "UDS accept failed");
+                    continue;
+                }
+            };
+
+            // Trust boundary: reject if the peer UID is not ours. The
+            // daemon and the native-messaging bridge must both run as
+            // the same user (the systemd unit binds to User=%i).
+            match stream.peer_cred() {
+                Ok(cred) if cred.uid() == our_uid => {}
+                Ok(cred) => {
+                    warn!(
+                        peer_uid = cred.uid(),
+                        our_uid, "UDS peer UID mismatch — dropping connection"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    warn!(err = %err, "UDS peer_cred() failed — dropping connection");
+                    continue;
+                }
+            }
+
+            // Turn the router into a service for this single connection.
+            let mut make_service = router.clone().into_make_service();
+            let svc = match make_service.call(&()).await {
+                Ok(svc) => svc,
+                Err(err) => {
+                    warn!(err = %err, "signal router into_service failed");
+                    continue;
+                }
+            };
+
+            let svc = hyper_util::service::TowerToHyperService::new(svc);
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                if let Err(err) = HyperAutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await
+                {
+                    debug!(err = %err, "UDS HTTP connection closed with error");
+                }
+            });
+        }
+    });
+
+    info!(path = %sock_display, "browser signal server bound (uds)");
     Ok(store)
 }
 
@@ -225,10 +368,13 @@ async fn ping_handler() -> Json<PingResponse> {
 
 async fn report_handler(
     State(store): State<Arc<SignalStore>>,
+    Extension(transport): Extension<TransportKind>,
     headers: HeaderMap,
     Json(report): Json<BrowserSignalsReport>,
 ) -> StatusCode {
-    if headers.get(SOURCE_HEADER).and_then(|v| v.to_str().ok()) != Some(SOURCE_VALUE) {
+    if transport.requires_source_header
+        && headers.get(SOURCE_HEADER).and_then(|v| v.to_str().ok()) != Some(SOURCE_VALUE)
+    {
         debug!("rejecting browser signal report: missing trusted source header");
         return StatusCode::UNAUTHORIZED;
     }
@@ -486,5 +632,110 @@ mod tests {
             guard.get("firefox").unwrap().report.browser.instance_id,
             "abc-123"
         );
+    }
+
+    /// End-to-end UDS test — binds the real server on a tempdir path,
+    /// posts a minimal valid report via a raw `UnixStream` + hyper
+    /// handshake, and asserts 204.
+    ///
+    /// The peer-UID mismatch path is deliberately *not* covered here:
+    /// reproducing it in-process would require changing our EUID,
+    /// which a standard `cargo test` cannot do. The branch is a
+    /// single `if peer_uid != our_uid` guard in `spawn_uds_server`
+    /// and is exercised by integration tests run as a second UID.
+    #[tokio::test]
+    async fn uds_server_accepts_report_with_correct_peer_uid() {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("signals.sock");
+        let sock_str = sock_path.to_str().unwrap();
+
+        let store = spawn_uds_server(sock_str, Duration::from_secs(45), Duration::from_secs(90))
+            .await
+            .expect("spawn_uds_server");
+
+        // Give the accept loop a moment to enter listen state.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let stream = tokio::net::UnixStream::connect(&sock_path)
+            .await
+            .expect("connect to uds");
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+            .await
+            .expect("hyper handshake");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "protocol_version": 1,
+            "sent_at_ms": wall_clock_ms(),
+            "browser": { "family": "firefox", "instance_id": "test" },
+            "tabs": [{ "audible": true }]
+        }))
+        .unwrap();
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/v1/signals/report")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap();
+
+        let resp = sender.send_request(req).await.expect("send_request");
+        assert_eq!(resp.status(), 204);
+        // Drain
+        let _ = resp.into_body().collect().await;
+
+        // Sanity-check the audible veto reached the store through UDS.
+        let veto = store
+            .profile_veto_at("firefox", Instant::now(), wall_clock_ms())
+            .expect("audible veto should be set");
+        assert_eq!(veto.reason, "audible-tab");
+
+        // The listener task holds its own clone of Arc<SignalStore>,
+        // so dropping our store handle here does NOT trigger the
+        // SocketCleanup Drop in-test; the cleanup path is exercised at
+        // process exit. `tempfile::TempDir` removes the parent dir on
+        // drop either way, so we don't leak filesystem state.
+        drop(store);
+        assert!(
+            sock_path.exists(),
+            "socket stays alive while the accept loop holds its clone"
+        );
+    }
+
+    #[test]
+    fn socket_cleanup_unlinks_on_drop() {
+        // Narrow unit test for the SocketCleanup Drop contract — the
+        // integration test above can't exercise it because the spawned
+        // accept-loop task keeps a SignalStore clone alive. Here we
+        // build a standalone SocketCleanup and prove the Drop removes
+        // the file synchronously.
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("phantom.sock");
+        std::fs::write(&sock, b"not-actually-a-socket").unwrap();
+        assert!(sock.exists());
+        {
+            let _guard = SocketCleanup { path: sock.clone() };
+        } // guard drops here
+        assert!(!sock.exists(), "SocketCleanup must unlink on Drop");
+    }
+
+    #[tokio::test]
+    async fn uds_server_rejects_unknown_transport() {
+        let err = spawn_server(
+            "doesnotexist",
+            "ignored",
+            Duration::from_secs(45),
+            Duration::from_secs(90),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown signal_transport"));
     }
 }

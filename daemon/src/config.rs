@@ -114,6 +114,23 @@ pub struct Config {
     #[serde(default = "default_signal_interaction_grace_secs")]
     pub signal_interaction_grace_secs: u64,
 
+    /// Transport used by the browser signal server. `"uds"` (the
+    /// default from v0.4.0 onward) binds a Unix domain socket at
+    /// `signal_uds_path`, enforces `SO_PEERCRED` UID == our EUID, and
+    /// is the transport the native-messaging bridge expects. `"tcp"`
+    /// keeps the legacy loopback HTTP server at `signal_server_bind`,
+    /// kept for development and for operators who have not yet
+    /// installed `bssl-ram-bridge`.
+    #[serde(default = "default_signal_transport")]
+    pub signal_transport: String,
+
+    /// Filesystem path used when `signal_transport = "uds"`. Must be
+    /// writable by the daemon (the shipped systemd unit provisions
+    /// `/run/bssl-ram/` with mode 0700). The socket file itself is
+    /// chmod 0600 after bind.
+    #[serde(default = "default_signal_uds_path")]
+    pub signal_uds_path: String,
+
     /// Browser/app profiles used by the scanner. Each profile is a
     /// declarative cmdline-match rule. Defaults to a built-in set covering
     /// Firefox-family + Chromium-family + Electron apps. Users can replace
@@ -148,6 +165,8 @@ impl Default for Config {
             signal_server_bind: default_signal_server_bind(),
             signal_ttl_secs: default_signal_ttl_secs(),
             signal_interaction_grace_secs: default_signal_interaction_grace_secs(),
+            signal_transport: default_signal_transport(),
+            signal_uds_path: default_signal_uds_path(),
             profiles: default_profiles(),
         }
     }
@@ -193,6 +212,14 @@ fn default_signal_interaction_grace_secs() -> u64 {
     90
 }
 
+fn default_signal_transport() -> String {
+    "uds".into()
+}
+
+fn default_signal_uds_path() -> String {
+    "/run/bssl-ram/signals.sock".into()
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = Path::new("/etc/bssl-ram/config.toml");
@@ -232,6 +259,8 @@ mod tests {
         assert_eq!(parsed.signal_server_enabled, defaults.signal_server_enabled);
         assert_eq!(parsed.signal_server_bind, defaults.signal_server_bind);
         assert_eq!(parsed.signal_ttl_secs, defaults.signal_ttl_secs);
+        assert_eq!(parsed.signal_transport, defaults.signal_transport);
+        assert_eq!(parsed.signal_uds_path, defaults.signal_uds_path);
         assert_eq!(
             parsed.signal_interaction_grace_secs,
             defaults.signal_interaction_grace_secs,
