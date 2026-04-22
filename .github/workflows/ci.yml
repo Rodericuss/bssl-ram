@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -41,3 +42,66 @@ jobs:
 
       - name: cargo build (release)
         run: cargo build --release
+
+  package:
+    name: package release tarball
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required by softprops/action-gh-release on tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+
+      - name: build release binary
+        working-directory: daemon
+        run: cargo build --release
+
+      - name: assemble tarball
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="$(git rev-parse --short HEAD)"
+          fi
+          STAGE="bssl-ram-${VERSION}-x86_64-linux"
+          mkdir -p "$STAGE"
+          cp daemon/target/release/bssl-ram   "$STAGE/"
+          cp daemon/systemd/bssl-ram@.service "$STAGE/"
+          cp daemon/systemd/README.md         "$STAGE/SYSTEMD.md"
+          cp README.md                        "$STAGE/"
+          chmod +x "$STAGE/bssl-ram"
+          tar czf "${STAGE}.tar.gz" "$STAGE"
+          sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          {
+            echo "TARBALL=${STAGE}.tar.gz"
+            echo "SHA256=${STAGE}.tar.gz.sha256"
+            echo "ARTIFACT_NAME=${STAGE}"
+          } >> "$GITHUB_ENV"
+
+      - name: upload artifact (every push)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            ${{ env.TARBALL }}
+            ${{ env.SHA256 }}
+          retention-days: 90
+
+      - name: create github release (tag only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.SHA256 }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
