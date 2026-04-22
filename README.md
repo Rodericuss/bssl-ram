@@ -33,8 +33,26 @@ cd daemon && cargo build --release
 # 2. Make sure zram is on (Arch)
 sudo pacman -S zram-generator
 
-# 3. Run (needs root for cross-PID process_madvise)
-sudo ./target/release/bssl-ram
+# 3. Install + enable the system template service for your user
+sudo install -Dm755 target/release/bssl-ram /usr/local/bin/bssl-ram
+sudo install -Dm644 systemd/bssl-ram@.service /etc/systemd/system/bssl-ram@.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now bssl-ram@$USER.service
+
+# 4. Watch it work
+journalctl -u bssl-ram@$USER -f
+```
+
+The daemon runs as **your user** (not root) with `CAP_SYS_NICE` +
+`CAP_SYS_PTRACE` ambient capabilities — enough to satisfy
+`ptrace_may_access()` against your own Firefox without `sudo`.
+Full setup notes: [`daemon/systemd/README.md`](daemon/systemd/README.md).
+
+Prefer no systemd? Skip step 3 and use file capabilities:
+
+```bash
+sudo setcap cap_sys_nice,cap_sys_ptrace+eip /usr/local/bin/bssl-ram
+/usr/local/bin/bssl-ram   # runs without sudo
 ```
 
 Dry-run first if you're paranoid:
@@ -151,7 +169,7 @@ sudo ./target/debug/examples/compress_real
 |:---|:---|
 | Linux kernel ≥ 5.10 | `process_madvise` and `pidfd_open` syscalls |
 | zram configured as swap | Without it, pages go to disk — defeats the point |
-| Root or `CAP_SYS_PTRACE` | Needed to page out memory of processes you don't own |
+| `CAP_SYS_NICE` + `CAP_SYS_PTRACE` | Granted by the systemd unit or via `setcap` — no permanent root |
 | Firefox | Any recent version |
 
 ---
