@@ -19,6 +19,15 @@ pub struct Config {
     /// Default: 2 ticks = 20ms of CPU per interval = essentially idle.
     pub cpu_delta_threshold: u64,
 
+    /// CPU ticks delta above this value is treated as a real user
+    /// wakeup and clears the anti-recompression flag for that PID. Set
+    /// well above `cpu_delta_threshold` so the small bursts that
+    /// browsers fire while idle (GC, service-worker pulses, internal
+    /// timers) don't masquerade as activity and trigger a recompression
+    /// of pages that are already in zram.
+    /// Default: 50 ticks = 500ms of CPU per interval.
+    pub wakeup_delta_threshold: u64,
+
     /// Minimum RSS (MiB) a process must have to be worth compressing.
     /// Skip tiny processes to avoid wasting syscall overhead.
     pub min_rss_mib: u64,
@@ -52,6 +61,7 @@ impl Default for Config {
             idle_cycles_threshold: 3,
             scan_interval_secs: 10,
             cpu_delta_threshold: 2,
+            wakeup_delta_threshold: 50,
             min_rss_mib: 50,
             dry_run: false,
             telemetry_interval_cycles: default_telemetry_interval(),

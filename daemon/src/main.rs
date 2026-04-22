@@ -147,7 +147,11 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
             utime,
             stime,
         };
-        let is_idle = tracker.update(snap, config.cpu_delta_threshold);
+        let is_idle = tracker.update(
+            snap,
+            config.cpu_delta_threshold,
+            config.wakeup_delta_threshold,
+        );
         let cycles = tracker.idle_cycles(pid);
 
         if !is_idle {

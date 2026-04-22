@@ -44,7 +44,34 @@ impl CpuTracker {
     /// Side effect: when a non-idle delta is seen, the "already compressed"
     /// flag is cleared — the process has woken up, so a future idle period
     /// is eligible for compression again.
-    pub fn update(&mut self, snap: ProcSnapshot, cpu_delta_threshold: u64) -> bool {
+    /// Update snapshot and return whether the process is currently idle.
+    ///
+    /// Two thresholds, two questions:
+    ///
+    ///   * `cpu_delta_threshold` answers **"is this idle right now?"** —
+    ///     a small budget (default 2 ticks ≈ 20ms of CPU per cycle).
+    ///     Below it, the idle-cycle counter accrues toward compression;
+    ///     above it, the counter resets.
+    ///
+    ///   * `wakeup_delta_threshold` answers **"did the user actually
+    ///     interact with this process?"** — a much higher bar (default
+    ///     50 ticks ≈ 500ms of CPU per cycle). Only crossing this clears
+    ///     the anti-recompression flag.
+    ///
+    /// Why two? Firefox / Chromium content procs fire GC, service-worker
+    /// pulses, and internal timers that briefly burn 5–30 ticks even
+    /// while the tab is unattended. Without a separate wakeup bar, every
+    /// such micro-burst clears the `compressed` flag and the next idle
+    /// cycle re-issues `process_madvise` on pages that are already in
+    /// zram — burning CPU and growing zstd churn for no benefit. Live
+    /// repro showed PIDs being compressed 3× in 90s; with the dual
+    /// threshold each PID is compressed once until real user activity.
+    pub fn update(
+        &mut self,
+        snap: ProcSnapshot,
+        cpu_delta_threshold: u64,
+        wakeup_delta_threshold: u64,
+    ) -> bool {
         let pid = snap.pid;
 
         // PID-reuse guard. If we already know about this PID but the
@@ -61,21 +88,34 @@ impl CpuTracker {
             }
         }
 
-        let idle = if let Some(prev) = self.snapshots.get(&pid) {
-            let delta = (snap.utime + snap.stime).saturating_sub(prev.utime + prev.stime);
-            delta <= cpu_delta_threshold
+        let delta = if let Some(prev) = self.snapshots.get(&pid) {
+            (snap.utime + snap.stime).saturating_sub(prev.utime + prev.stime)
         } else {
-            // First snapshot — not enough data, assume active
-            false
+            // First snapshot — no delta available. Treat as active so a
+            // freshly-spawned tab isn't compressed before we have any
+            // idea what it's doing.
+            u64::MAX
         };
+        let idle = delta <= cpu_delta_threshold;
+        let woke_up = delta > wakeup_delta_threshold && delta != u64::MAX;
 
         self.snapshots.insert(pid, snap);
 
         if idle {
             *self.idle_cycles.entry(pid).or_insert(0) += 1;
         } else {
+            // Active this cycle (delta above the *idle* bar) — restart
+            // the warmup counter so we don't compress on stale idleness.
             self.idle_cycles.insert(pid, 0);
-            // Woke up — eligible for compression again next time it idles
+        }
+
+        if woke_up {
+            // Real user activity (delta above the *wakeup* bar) — the
+            // process probably faulted in pages we paged out, so it
+            // makes sense to consider it for compression again the next
+            // time it goes idle. Pulses below this bar (Firefox GC,
+            // service worker tick, browser timers, …) leave the flag
+            // alone, killing the recompression cascade.
             self.compressed.remove(&pid);
         }
 
@@ -150,51 +190,120 @@ mod tests {
         // treat as active. Keeps a freshly-spawned tab from being instantly
         // compressed before we have any idea what it's doing.
         let mut t = CpuTracker::new();
-        assert!(!t.update(snap(1, 100, 50), 2));
+        assert!(!t.update(snap(1, 100, 50), 2, 50));
         assert_eq!(t.idle_cycles(1), 0);
     }
 
     #[test]
     fn idle_cycles_accumulate_then_reset_on_activity() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 100, 50), 2); // first sample
-        assert!(t.update(snap(1, 100, 50), 2)); // delta 0 — idle
+        t.update(snap(1, 100, 50), 2, 50); // first sample
+        assert!(t.update(snap(1, 100, 50), 2, 50)); // delta 0 — idle
         assert_eq!(t.idle_cycles(1), 1);
-        assert!(t.update(snap(1, 101, 50), 2)); // delta 1 — still under threshold
+        assert!(t.update(snap(1, 101, 50), 2, 50)); // delta 1 — still under threshold
         assert_eq!(t.idle_cycles(1), 2);
-        assert!(!t.update(snap(1, 200, 50), 2)); // delta 99 — active, reset
+        assert!(!t.update(snap(1, 200, 50), 2, 50)); // delta 99 — active, reset
         assert_eq!(t.idle_cycles(1), 0);
     }
 
     #[test]
     fn delta_exactly_at_threshold_is_idle() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
         // total delta = 2 (utime+stime), threshold = 2 ⇒ "delta <= threshold" ⇒ idle
-        assert!(t.update(snap(1, 1, 1), 2));
+        assert!(t.update(snap(1, 1, 1), 2, 50));
     }
 
     #[test]
     fn compressed_flag_persists_across_idle_cycles() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), 2, 50);
         t.mark_compressed(1);
         assert!(t.is_compressed(1));
         // Another idle tick must NOT clear the flag — the whole point is
         // to keep skipping this PID until it shows activity.
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
         assert!(t.is_compressed(1));
     }
 
     #[test]
     fn compressed_flag_clears_on_activity() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
         t.mark_compressed(1);
         assert!(t.is_compressed(1));
-        t.update(snap(1, 100, 100), 2); // big delta ⇒ active
+        t.update(snap(1, 100, 100), 2, 50); // big delta ⇒ active
         assert!(!t.is_compressed(1));
+    }
+
+    #[test]
+    fn small_burst_resets_idle_but_keeps_compressed_flag() {
+        // The bug Rodrigo flagged + we reproduced live: Firefox content
+        // procs fire small CPU bursts (GC, service worker pulses) of
+        // 5–30 ticks even on tabs the user is not looking at. Pre-fix,
+        // any delta above the *idle* threshold cleared the compressed
+        // flag and the next idle cycle re-issued process_madvise on
+        // pages that were already in zram. Post-fix, only deltas above
+        // the *wakeup* threshold count as real activity.
+        let mut t = CpuTracker::new();
+        // Establish baseline + idle + compressed
+        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), 2, 50);
+        t.mark_compressed(1);
+        assert!(t.is_compressed(1));
+
+        // Burst of 10 ticks (between idle=2 and wakeup=50). Tab is
+        // technically "active" this cycle so idle_cycles drops to 0,
+        // but the compressed flag MUST NOT be cleared — pages are
+        // still in zram, the burst was browser internal noise.
+        let still_idle = t.update(snap(1, 6, 4), 2, 50);
+        assert!(
+            !still_idle,
+            "burst > cpu_delta_threshold ⇒ not idle this cycle"
+        );
+        assert_eq!(t.idle_cycles(1), 0, "idle warmup must restart");
+        assert!(
+            t.is_compressed(1),
+            "small burst must NOT clear compressed flag — that was the recompression bug",
+        );
+    }
+
+    #[test]
+    fn real_wakeup_clears_compressed_flag() {
+        // Counter-test: a delta well above the wakeup threshold (real
+        // user interaction or a page faulting in lots of paged-out
+        // memory) must clear compressed so the next idle period is
+        // eligible for compression again.
+        let mut t = CpuTracker::new();
+        t.update(snap(1, 0, 0), 2, 50);
+        t.mark_compressed(1);
+        // Delta = 200 ticks (2s of CPU) — clearly real activity
+        let still_idle = t.update(snap(1, 100, 100), 2, 50);
+        assert!(!still_idle);
+        assert!(
+            !t.is_compressed(1),
+            "delta > wakeup_threshold must clear flag"
+        );
+    }
+
+    #[test]
+    fn first_observation_does_not_count_as_wakeup() {
+        // First snapshot has no prior delta to compare against. The old
+        // code special-cased this as "active" (idle=false) and would
+        // have cleared compressed. Post-fix, with no delta available we
+        // model the gap as u64::MAX and skip the wakeup branch — there
+        // can't be a meaningful "wakeup" without a prior measurement.
+        let mut t = CpuTracker::new();
+        // Pretend this PID was already marked compressed (e.g. carried
+        // across a refactor / future state restore)
+        t.mark_compressed(1);
+        let idle = t.update(snap(1, 100, 100), 2, 50);
+        assert!(!idle, "first observation is treated as active");
+        assert!(
+            t.is_compressed(1),
+            "first observation must NOT clear an existing compressed flag",
+        );
     }
 
     #[test]
@@ -206,14 +315,14 @@ mod tests {
         let mut t = CpuTracker::new();
 
         // Old task: compressed, fully tracked
-        t.update(snap_at(42, 100, 50, 1000), 2);
-        t.update(snap_at(42, 100, 50, 1000), 2); // idle
+        t.update(snap_at(42, 100, 50, 1000), 2, 50);
+        t.update(snap_at(42, 100, 50, 1000), 2, 50); // idle
         t.mark_compressed(42);
         assert!(t.is_compressed(42));
         assert_eq!(t.idle_cycles(42), 1);
 
         // Same PID, but starttime advanced — kernel recycled it
-        let still_idle = t.update(snap_at(42, 999, 999, 5000), 2);
+        let still_idle = t.update(snap_at(42, 999, 999, 5000), 2, 50);
 
         // Fresh task: no inherited state
         assert!(!still_idle, "new task must be treated as first observation");
@@ -228,9 +337,9 @@ mod tests {
     fn retain_only_drops_pids_not_in_live_set() {
         use std::collections::HashSet;
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
-        t.update(snap(2, 0, 0), 2);
-        t.update(snap(3, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(2, 0, 0), 2, 50);
+        t.update(snap(3, 0, 0), 2, 50);
         t.mark_compressed(1);
         t.mark_compressed(2);
 
@@ -247,7 +356,7 @@ mod tests {
     fn retain_only_with_empty_live_set_clears_everything() {
         use std::collections::HashSet;
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
         t.mark_compressed(1);
         t.retain_only(&HashSet::new());
         assert_eq!(t.tracked_pids(), 0);
@@ -256,7 +365,7 @@ mod tests {
     #[test]
     fn remove_clears_all_tracking_state_for_pid() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2);
+        t.update(snap(1, 0, 0), 2, 50);
         t.mark_compressed(1);
         t.remove(1);
         assert!(!t.is_compressed(1));
@@ -270,8 +379,8 @@ mod tests {
         // smaller "current" values doesn't underflow into a huge delta
         // that would falsely flag the process as wildly active.
         let mut t = CpuTracker::new();
-        t.update(snap(1, 1000, 1000), 2);
-        assert!(t.update(snap(1, 100, 100), 2)); // would underflow without saturating_sub
+        t.update(snap(1, 1000, 1000), 2, 50);
+        assert!(t.update(snap(1, 100, 100), 2, 50)); // would underflow without saturating_sub
         assert_eq!(t.idle_cycles(1), 1);
     }
 }
