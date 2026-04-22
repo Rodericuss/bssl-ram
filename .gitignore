@@ -1,3 +1,4 @@
 daemon/target/
 *.log
 /etc/foxram/
+.idea
