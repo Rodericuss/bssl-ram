@@ -1,5 +1,7 @@
 mod compressor;
 mod config;
+mod proc_connector;
+mod process_table;
 mod psi;
 mod scanner;
 mod state;
@@ -9,7 +11,8 @@ mod zram;
 use anyhow::Result;
 use compressor::{compress_pid, read_proc_stats, rss_mib};
 use config::Config;
-use scanner::scan_targets;
+use process_table::ProcessTable;
+use scanner::{scan_targets, TargetProcess};
 use state::{CpuTracker, ProcSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +51,25 @@ async fn main() -> Result<()> {
     }
 
     zram::ensure_zram_swap(&config)?;
+
+    // cn_proc — process events via netlink. Maintains an in-memory
+    // table of matched targets so scan_cycle never has to walk /proc
+    // again. Fails gracefully (warn + None) when CAP_NET_ADMIN is
+    // missing or the kernel was built without CONFIG_PROC_EVENTS, in
+    // which case scan_cycle falls back to the per-cycle /proc walk.
+    let process_table = match ProcessTable::spawn(config.profiles.clone()) {
+        Ok(t) => {
+            info!(
+                tracked = t.tracked(),
+                "cn_proc table active — /proc walks bypassed"
+            );
+            Some(t)
+        }
+        Err(e) => {
+            warn!(err = %e, "cn_proc unavailable — falling back to /proc walk per cycle");
+            None
+        }
+    };
 
     // PSI memory pressure trigger. When the kernel reports that processes
     // collectively spent > psi_stall_threshold_us waiting on memory inside
@@ -93,7 +115,8 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(config.scan_interval_secs)) => {
                 cycle += 1;
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer);
+                let targets = collect_targets(&process_table, &config);
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets);
 
                 if config.telemetry_interval_cycles > 0
                     && cycle.is_multiple_of(config.telemetry_interval_cycles)
@@ -102,13 +125,8 @@ async fn main() -> Result<()> {
                 }
             }
             _ = psi_notify.notified() => {
-                // Notified() blocks forever when nobody is sending — so
-                // when PSI is off (psi_active = false) this arm simply
-                // never fires and the timer arm above carries the loop.
                 cycle += 1;
                 stats.inc(&stats.psi_events);
-                // Snapshot current pressure for the log line so the operator
-                // can see *how bad* it was when the scan fired.
                 if let Ok(p) = psi::read_memory() {
                     info!(
                         some_avg10 = p.some_avg10,
@@ -117,27 +135,42 @@ async fn main() -> Result<()> {
                         "PSI pressure event — running adaptive scan",
                     );
                 }
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure);
+                let targets = collect_targets(&process_table, &config);
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure, &targets);
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received — shutting down gracefully");
                 shutdown.store(true, Ordering::Relaxed);
+                if let Some(t) = &process_table { t.shutdown(); }
                 stats.emit();
                 break;
             }
             _ = sigterm.recv() => {
                 info!("SIGTERM received — shutting down gracefully");
                 shutdown.store(true, Ordering::Relaxed);
+                if let Some(t) = &process_table { t.shutdown(); }
                 stats.emit();
                 break;
             }
         }
     }
 
-    // Surface the chosen mode in the final shutdown line so a journalctl
-    // grep can quickly confirm which path the daemon used in this session.
-    info!(psi_active, "daemon stopping");
+    info!(
+        psi_active,
+        cn_proc_active = process_table.is_some(),
+        "daemon stopping"
+    );
     Ok(())
+}
+
+/// Pick the right discovery path: cached in-memory table when cn_proc
+/// is alive, otherwise the per-cycle /proc walk. Both return the same
+/// Vec<TargetProcess> shape so scan_cycle stays oblivious.
+fn collect_targets(table: &Option<ProcessTable>, config: &Config) -> Vec<TargetProcess> {
+    match table {
+        Some(t) => t.live_targets(),
+        None => scan_targets(&config.profiles),
+    }
 }
 
 /// Why this scan is happening — surfaces in the per-cycle log so a
@@ -194,12 +227,12 @@ fn scan_cycle(
     stats: &Stats,
     cycle: u64,
     trigger: ScanTrigger,
+    targets: &[TargetProcess],
 ) {
     let started = Instant::now();
-    let targets = scan_targets(&config.profiles);
 
     let mut by_profile: HashMap<&str, usize> = HashMap::new();
-    for t in &targets {
+    for t in targets {
         *by_profile.entry(t.profile.as_str()).or_insert(0) += 1;
     }
     let mut summary: Vec<String> = by_profile
@@ -230,7 +263,7 @@ fn scan_cycle(
     // not PID-reused either — just gone).
     let mut seen_pids: HashSet<u32> = HashSet::with_capacity(targets.len());
 
-    for tab in &targets {
+    for tab in targets {
         let pid = tab.pid;
         let profile = tab.profile.as_str();
         seen_pids.insert(pid);

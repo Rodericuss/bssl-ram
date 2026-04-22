@@ -38,8 +38,13 @@ Group=%i
 # works but falls back to timer-only mode; with it, the daemon also
 # wakes up on real kernel-reported memory pressure events instead of
 # only the safety-net timer.
-AmbientCapabilities=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE
-CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE
+# CAP_NET_ADMIN is needed by older kernels to bind the netlink connector
+# socket and subscribe to the proc connector multicast group; recent
+# kernels relaxed this to allow unprivileged use, but granting the cap
+# keeps the feature working everywhere. Without it the daemon falls
+# back to walking /proc per scan cycle (see proc_connector.rs).
+AmbientCapabilities=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN
 
 # Sandboxing ------------------------------------------------------------------
 # Kept minimal. Aggressive options like ProtectKernelTunables, PrivateUsers,

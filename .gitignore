@@ -2,3 +2,5 @@ daemon/target/
 *.log
 /etc/foxram/
 .idea
+.codex
+.claude
