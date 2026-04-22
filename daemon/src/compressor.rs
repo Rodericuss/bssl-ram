@@ -7,6 +7,11 @@ use tracing::{debug, info, warn};
 const SYS_PROCESS_MADVISE: c_long = 440;
 const MADV_PAGEOUT: c_int = 21;
 
+// Maximum iovecs per process_madvise call (POSIX IOV_MAX, queried via
+// `getconf IOV_MAX`). Linux pins this at 1024. Batching up to this many
+// regions per syscall amortises both syscall and TLB-shootdown costs.
+const IOV_MAX: usize = 1024;
+
 /// Opens a pidfd for the given PID.
 /// pidfd is the modern Linux API for safely referencing processes
 /// without PID reuse races.
@@ -144,44 +149,62 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<()> {
 
     let pidfd = open_pidfd(pid)?;
 
-    let mut paged_out = 0usize;
-    for (start, size) in &regions {
-        let iov = iovec {
+    // Build iovec table once. Each chunk of up to IOV_MAX entries goes out
+    // in a single process_madvise() call — kernel walks the array, applies
+    // MADV_PAGEOUT to each range, and amortises a single TLB shootdown
+    // pass across the whole batch.
+    let iovs: Vec<iovec> = regions
+        .iter()
+        .map(|(start, size)| iovec {
             iov_base: *start as *mut libc::c_void,
             iov_len: *size,
-        };
+        })
+        .collect();
 
+    let total_requested: usize = regions.iter().map(|(_, s)| *s).sum();
+    let mut bytes_advised: usize = 0;
+    let mut chunks_done = 0usize;
+
+    for chunk in iovs.chunks(IOV_MAX) {
         let ret = unsafe {
             libc::syscall(
                 SYS_PROCESS_MADVISE,
                 pidfd,
-                &iov as *const iovec,
-                1usize,       // iovec count
+                chunk.as_ptr(),
+                chunk.len(),
                 MADV_PAGEOUT,
-                0u32,         // flags (must be 0)
+                0u32, // flags (must be 0)
             )
         };
 
         if ret < 0 {
+            // Whole-batch failure (EFAULT, EINVAL on bad iovec table, etc.).
+            // Per-region EPERM/EINVAL within a batch returns a *partial*
+            // bytes_advised count instead — those are not errors, they
+            // just mean the kernel skipped some ranges and kept going.
             let err = std::io::Error::last_os_error();
-            // EPERM is expected for some regions (locked pages, vDSO, etc.)
-            // EINVAL for huge pages or special mappings
-            // We warn but continue — partial compression is still useful
             warn!(
-                "MADV_PAGEOUT failed for pid {} region 0x{:x}+{}: {}",
-                pid, start, size, err
+                "process_madvise batch failed for pid {} chunk {} ({} iovecs): {}",
+                pid,
+                chunks_done,
+                chunk.len(),
+                err
             );
         } else {
-            paged_out += size;
+            bytes_advised += ret as usize;
         }
+        chunks_done += 1;
     }
 
     unsafe { libc::close(pidfd) };
 
+    let skipped = total_requested.saturating_sub(bytes_advised);
     info!(
-        "pid {} paged out ~{} MiB to zram",
+        "pid {} paged out {} MiB to zram in {} batch(es) ({} MiB skipped by kernel)",
         pid,
-        paged_out / 1024 / 1024
+        bytes_advised / 1024 / 1024,
+        chunks_done,
+        skipped / 1024 / 1024,
     );
     Ok(())
 }
