@@ -19,9 +19,14 @@ suppressPackageStartupMessages({
   library(scales)
 })
 
-all_args  <- commandArgs(trailingOnly = FALSE)
-args      <- commandArgs(trailingOnly = TRUE)
+all_args   <- commandArgs(trailingOnly = FALSE)
+args       <- commandArgs(trailingOnly = TRUE)
 make_plots <- !("--no-plots" %in% args)
+# When --report is passed (default) the script also writes
+# bench/REPORT.md next to the plots — the file the main README links
+# to. Pass --no-report to suppress (useful for ad-hoc runs where you
+# only want stdout).
+make_report <- !("--no-report" %in% args)
 
 # Locate ourselves: with `Rscript bench/analyze.R` the --file= arg
 # carries the path; fall back to "." when sourced interactively.
@@ -195,9 +200,22 @@ recompress <- load_all("^recompress-.*\\.txt$",     parse_recompress)
 # Markdown tables on stdout.
 # ----------------------------------------------------------------------
 
-cat("# bssl-ram — benchmark report\n")
-cat("\nGenerated: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"), "\n", sep = "")
-cat("Source: aggregated across all runs in `bench/results/`.\n\n")
+## The markdown report is streamed to stdout *and* to
+## bench/REPORT.md simultaneously, so `Rscript bench/analyze.R` both
+## prints a summary and refreshes the file the project README links
+## to. Everything below that uses cat() goes through tee_md().
+report_path <- file.path(repo_root, "bench", "REPORT.md")
+report_con  <- if (make_report) file(report_path, open = "w") else NULL
+tee_md <- function(...) {
+  msg <- paste0(..., collapse = "")
+  cat(msg)
+  if (!is.null(report_con)) cat(msg, file = report_con)
+}
+
+tee_md("# bssl-ram — benchmark report\n")
+tee_md("\nGenerated: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"), "\n", sep = "")
+tee_md("\n> Regenerate with `Rscript bench/analyze.R`. Aggregated across every\n")
+tee_md("> timestamped run currently under `bench/results/`.\n\n")
 
 agg_summary <- function(df, group_col, value_col, fmt = "%.3f", unit = "") {
   g <- split(df[[value_col]], df[[group_col]])
@@ -215,20 +233,37 @@ agg_summary <- function(df, group_col, value_col, fmt = "%.3f", unit = "") {
   }))
 }
 
+## Render a data.frame as a GitHub markdown table. Uses a for loop
+## (not apply) so the side-effect writes inside tee_md hit BOTH the
+## stdout cat() and the report file connection.
 print_md_table <- function(df, headers, aligns = NULL) {
   if (is.null(aligns)) aligns <- rep(":---", ncol(df))
-  cat("|", paste(headers, collapse = " | "), "|\n")
-  cat("|", paste(aligns,  collapse = " | "), "|\n")
-  apply(df, 1, function(row) {
-    cat("|", paste(row, collapse = " | "), "|\n")
-  })
-  cat("\n")
+  tee_md("| ", paste(headers, collapse = " | "), " |\n")
+  tee_md("| ", paste(aligns,  collapse = " | "), " |\n")
+  for (i in seq_len(nrow(df))) {
+    row <- as.character(unlist(df[i, ]))
+    tee_md("| ", paste(row, collapse = " | "), " |\n")
+  }
+  tee_md("\n")
+}
+
+## Helper: embed a <picture> with both light + dark variants of a
+## plot. Paths are relative to bench/REPORT.md so they resolve when the
+## file is rendered on github.com.
+embed_picture <- function(basename, alt) {
+  tee_md('<picture>\n')
+  tee_md('  <source media="(prefers-color-scheme: dark)" srcset="results/plots/',
+         basename, '-dark.png">\n', sep = "")
+  tee_md('  <img alt="', alt, '" src="results/plots/', basename, '-light.png">\n',
+         sep = "")
+  tee_md('</picture>\n\n')
 }
 
 # A — CPU
 if (!is.null(cpu)) {
-  cat("## Test A — daemon CPU per discovery mode\n\n")
-  cat("Aggregated across ", length(unique(cpu$run)), " run(s).\n\n", sep = "")
+  tee_md("## Test A — daemon CPU per discovery mode\n\n")
+  tee_md("Aggregated across ", length(unique(cpu$run)), " run(s).\n\n", sep = "")
+  embed_picture("test-a-cpu", "Bar chart: daemon CPU % per discovery mode")
   agg <- agg_summary(cpu, "label", "cpu_pct", "%.4f", " %")
   print_md_table(agg,
     headers = c("Config", "Runs", "Mean CPU %", "Std-dev", "Min %", "Max %"),
@@ -237,7 +272,9 @@ if (!is.null(cpu)) {
 
 # B — PSI latency
 if (!is.null(psi)) {
-  cat("## Test B — PSI reaction latency under 14 GiB allocation\n\n")
+  tee_md("## Test B — PSI reaction latency under 14 GiB allocation\n\n")
+  embed_picture("test-b-psi-latency",
+                "Bar chart: PSI on vs timer-only reaction time")
   agg <- agg_summary(psi, "label", "reaction_ms", "%.0f", " ms")
   print_md_table(agg,
     headers = c("Mode", "Runs", "Mean ms", "Std-dev", "Min ms", "Max ms"),
@@ -246,7 +283,9 @@ if (!is.null(psi)) {
 
 # C — real compression
 if (!is.null(compress)) {
-  cat("## Test C — real compression on largest renderer\n\n")
+  tee_md("## Test C — real compression on largest renderer\n\n")
+  embed_picture("test-c-rss-before-after",
+                "RSS before/after compression of the largest renderer")
   cmp <- transform(compress,
     rss_drop_mib = (rss_before_kib - rss_after_kib) / 1024,
     rate_pct     = (rss_before_kib - rss_after_kib) / rss_before_kib * 100)
@@ -267,7 +306,9 @@ if (!is.null(compress)) {
 
 # E — recompression
 if (!is.null(recompress)) {
-  cat("## Test E — recompression cascade prevention\n\n")
+  tee_md("## Test E — recompression cascade prevention\n\n")
+  embed_picture("test-e-recompression",
+                "Unique compressions vs recompressions over a 90s aggressive window")
   rows <- data.frame(
     Run             = recompress$run,
     `Total events`  = sprintf("%d", recompress$total),
@@ -287,7 +328,7 @@ if (!is.null(recompress)) {
 # ----------------------------------------------------------------------
 
 if (make_plots) {
-  cat("## Plots\n\nWritten to `bench/results/plots/`:\n\n")
+  tee_md("## Plots\n\nWritten to `bench/results/plots/`:\n\n")
   if (!is.null(cpu)) {
     save_pair(function(dark) {
       ggplot(cpu, aes(x = label, y = cpu_pct, fill = label)) +
@@ -303,7 +344,7 @@ if (make_plots) {
              x = NULL, y = "Average CPU %",
              caption = "bench/scripts/bench-cpu.sh")
     }, "test-a-cpu", w = 7, h = 4.2)
-    cat("- `test-a-cpu-{light,dark}.png`\n")
+    tee_md("- `test-a-cpu-{light,dark}.png`\n")
   }
   if (!is.null(psi)) {
     save_pair(function(dark) {
@@ -319,7 +360,7 @@ if (make_plots) {
              x = NULL, y = "milliseconds",
              caption = "bench/scripts/bench-psi-latency.sh")
     }, "test-b-psi-latency", w = 7, h = 4.2)
-    cat("- `test-b-psi-latency-{light,dark}.png`\n")
+    tee_md("- `test-b-psi-latency-{light,dark}.png`\n")
   }
   if (!is.null(compress)) {
     long <- rbind(
@@ -340,7 +381,7 @@ if (make_plots) {
              x = NULL, y = "MiB",
              caption = "bench/scripts/bench-real-compress.sh")
     }, "test-c-rss-before-after", w = 6, h = 4.2)
-    cat("- `test-c-rss-before-after-{light,dark}.png`\n")
+    tee_md("- `test-c-rss-before-after-{light,dark}.png`\n")
   }
   if (!is.null(recompress)) {
     long <- rbind(
@@ -359,7 +400,14 @@ if (make_plots) {
              x = NULL, y = "events",
              caption = "bench/scripts/bench-recompression.sh")
     }, "test-e-recompression", w = 6, h = 4.2)
-    cat("- `test-e-recompression-{light,dark}.png`\n")
+    tee_md("- `test-e-recompression-{light,dark}.png`\n")
   }
-  cat("\n")
+  tee_md("\n")
+}
+
+# Close the REPORT.md handle and surface its path on stderr so the
+# build / dev workflow can pipe it somewhere useful.
+if (!is.null(report_con)) {
+  close(report_con)
+  message("Wrote ", report_path)
 }
