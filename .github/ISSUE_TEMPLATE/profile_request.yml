@@ -1,0 +1,114 @@
+name: App profile request
+description: Ask for bssl-ram to recognize (or correctly exclude) a specific app.
+title: "profile: <app name>"
+labels: ["profile", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        bssl-ram ships built-in profiles for Firefox-family, Chromium-family
+        and Electron apps. If your app fits one of those families it's
+        probably already covered — check the README's *Supported apps*
+        table first.
+
+        Good candidates for a new built-in profile:
+
+        - Linux-native.
+        - Multi-process renderer architecture (Electron / CEF / custom).
+        - Idle renderer tolerates `MADV_PAGEOUT` with no observable glitch.
+        - At least 20% RSS reduction on an idle renderer.
+
+        If your app is niche / proprietary, a user-config example under
+        `daemon/examples/configs/` is usually the better landing spot.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing profile requests.
+          required: true
+        - label: My app isn't already matched by the built-in Firefox / Chromium / Electron profiles.
+          required: true
+
+  - type: input
+    id: app
+    attributes:
+      label: App name + version
+      placeholder: "Obsidian 1.7.7"
+    validations:
+      required: true
+
+  - type: input
+    id: homepage
+    attributes:
+      label: App homepage / source
+      placeholder: "https://obsidian.md"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: family
+    attributes:
+      label: Runtime family
+      options:
+        - Electron
+        - Chromium-based (custom)
+        - Firefox-based (custom)
+        - CEF-based
+        - Qt WebEngine
+        - Native (non-browser)
+        - Unknown / other
+    validations:
+      required: true
+
+  - type: textarea
+    id: ps-output
+    attributes:
+      label: `ps` output
+      description: |
+        Run `ps -eo pid,cmd | grep -i <app>` while the app is open with a
+        few windows, and paste the **full** output. We need to see which
+        PIDs should and shouldn't match.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: match-rule
+    attributes:
+      label: Proposed match rule
+      description: |
+        If you know what should match, sketch a profile block. If you're
+        not sure, leave blank and we'll propose one from the ps output.
+      render: toml
+      value: |
+        # [[profiles]]
+        # name = "myapp"
+        # binary_substring_any = ["myapp"]
+        # arg_required_all     = ["--type=renderer"]
+        # arg_excluded_any     = ["--extension-process"]
+    validations:
+      required: false
+
+  - type: textarea
+    id: measured
+    attributes:
+      label: Measured savings (optional but strongly encouraged)
+      description: |
+        If you've already patched bssl-ram locally, paste a before/after
+        RSS / PSS / Swap from `compress_real` on one renderer.
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: regressions
+    attributes:
+      label: Known bad interactions
+      description: |
+        Does this app play audio/video, use WebRTC, hold GPU buffers, pin
+        large native allocations, or exhibit cold-start glitches after
+        compression? Be honest — it saves time in review.
+    validations:
+      required: false
