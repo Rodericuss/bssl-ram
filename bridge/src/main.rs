@@ -79,9 +79,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(SubCmd::Install {
-                 user,
-                 chrome_ext_id,
-             }) => {
+            user,
+            chrome_ext_id,
+        }) => {
             let written = install::install(user, chrome_ext_id.as_deref())?;
             for path in &written {
                 println!("installed {}", path.display());
@@ -121,7 +121,7 @@ async fn run_bridge(origin: String) -> Result<()> {
                 &mut stdout,
                 &serde_json::json!({"ok": false, "reason": "daemon unreachable"}),
             )
-                .await;
+            .await;
             return Ok(());
         }
     };

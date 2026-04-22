@@ -61,7 +61,7 @@ impl PsiTrigger {
 
         let trigger = format!("some {} {}", stall_us, window_us);
         file.write_all(trigger.as_bytes()).with_context(|| {
-            format!("writing PSI trigger {:?} (needs CAP_SYS_RESOURCE)", trigger, )
+            format!("writing PSI trigger {:?} (needs CAP_SYS_RESOURCE)", trigger,)
         })?;
 
         Ok(Self {

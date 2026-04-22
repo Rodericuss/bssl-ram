@@ -676,7 +676,7 @@ mod tests {
             "browser": { "family": "firefox", "instance_id": "test" },
             "tabs": [{ "audible": true }]
         }))
-            .unwrap();
+        .unwrap();
 
         let req = hyper::Request::builder()
             .method("POST")
@@ -734,8 +734,8 @@ mod tests {
             Duration::from_secs(45),
             Duration::from_secs(90),
         )
-            .await
-            .unwrap_err();
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("unknown signal_transport"));
     }
 }

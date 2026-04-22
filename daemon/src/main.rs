@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
             Duration::from_secs(config.signal_ttl_secs),
             Duration::from_secs(config.signal_interaction_grace_secs),
         )
-            .await
+        .await
         {
             Ok(store) => {
                 info!(
