@@ -183,24 +183,6 @@ sudo ./target/debug/examples/compress_real
 
 ---
 
-## 📁 Layout
-
-```
-bssl-ram/
-├── daemon/
-│   ├── Cargo.toml
-│   ├── src/
-│   │   ├── main.rs         entry point + scan loop
-│   │   ├── config.rs       TOML config loader
-│   │   ├── scanner.rs      finds Firefox tab processes in /proc
-│   │   ├── compressor.rs   smaps parser + process_madvise + ticks reader
-│   │   ├── state.rs        per-PID CPU delta tracker
-│   │   └── zram.rs         swap presence check
-│   └── examples/           inspection binaries (scan, cpu, smaps, real)
-└── README.md
-```
-
----
 
 <div align="center">
 
