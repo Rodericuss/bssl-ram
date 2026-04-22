@@ -63,7 +63,9 @@ async fn main() -> Result<()> {
     let bpf_tracker = if config.enable_bpf_cpu_tracker {
         match bpf_cpu_tracker::BpfCpuTracker::load() {
             Ok(t) => {
-                info!("eBPF cpu_tracker active (smoke test mode — /proc/PID/stat still authoritative)");
+                info!(
+                    "eBPF cpu_tracker active — BPF map is authoritative, /proc/PID/stat bypassed in hot path",
+                );
                 Some(t)
             }
             Err(e) => {
@@ -159,7 +161,7 @@ async fn main() -> Result<()> {
                 }
 
                 let targets = collect_targets(&process_table, &config);
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets);
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets, &bpf_tracker);
 
                 // Smoke test: peek at the BPF map for our own PID so the
                 // operator sees in the journal that the kernel is updating
@@ -186,7 +188,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 let targets = collect_targets(&process_table, &config);
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure, &targets);
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure, &targets, &bpf_tracker);
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received — shutting down gracefully");
@@ -230,6 +232,35 @@ fn collect_targets(table: &Option<ProcessTable>, config: &Config) -> Vec<TargetP
 fn log_bpf_self_runtime(tracker: &bpf_cpu_tracker::BpfCpuTracker) {
     if let Some(ns) = tracker.runtime_ns(std::process::id()) {
         debug!(self_runtime_ns = ns, "bpf cpu_tracker reports self runtime");
+    }
+}
+
+/// Build a CPU snapshot for `pid`. Prefers the eBPF map when loaded
+/// (zero /proc reads in the hot path); falls back to /proc/PID/stat
+/// with a ticks→ns conversion otherwise. Returns None when the PID
+/// has gone away.
+fn build_snapshot(pid: u32, bpf: &Option<bpf_cpu_tracker::BpfCpuTracker>) -> Option<ProcSnapshot> {
+    const TICK_NS: u64 = 10_000_000;
+    if let Some(b) = bpf {
+        // BPF path: kernel-side accumulation, two cheap map lookups.
+        // If either is missing the task hasn't been scheduled yet —
+        // treat as "no snapshot" so the caller behaves like a first
+        // observation on the next cycle.
+        let cpu_ns = b.runtime_ns(pid)?;
+        let starttime = b.starttime_ns(pid)?;
+        Some(ProcSnapshot {
+            pid,
+            starttime,
+            cpu_ns,
+        })
+    } else {
+        // Fallback: parse /proc/PID/stat.
+        let (starttime, utime, stime) = read_proc_stats(pid)?;
+        Some(ProcSnapshot {
+            pid,
+            starttime,
+            cpu_ns: (utime + stime) * TICK_NS,
+        })
     }
 }
 
@@ -288,6 +319,7 @@ fn scan_cycle(
     cycle: u64,
     trigger: ScanTrigger,
     targets: &[TargetProcess],
+    bpf_tracker: &Option<bpf_cpu_tracker::BpfCpuTracker>,
 ) {
     let started = Instant::now();
 
@@ -323,15 +355,29 @@ fn scan_cycle(
     // not PID-reused either — just gone).
     let mut seen_pids: HashSet<u32> = HashSet::with_capacity(targets.len());
 
+    // Config thresholds are still expressed in TICKS for config-file
+    // backward compatibility (1 tick = 10ms at the default USER_HZ=100).
+    // Convert to ns once per cycle so the inner loop never has to.
+    const TICK_NS: u64 = 10_000_000;
+    let cpu_delta_ns = config.cpu_delta_threshold * TICK_NS;
+    let wakeup_delta_ns = config.wakeup_delta_threshold * TICK_NS;
+
     for tab in targets {
         let pid = tab.pid;
         let profile = tab.profile.as_str();
         seen_pids.insert(pid);
 
-        let (starttime, utime, stime) = match read_proc_stats(pid) {
-            Some(t) => t,
+        // Build the per-PID snapshot. When the BPF cpu_tracker is loaded
+        // we read both starttime and cpu_ns straight from kernel maps —
+        // zero /proc syscalls in the hot path. Otherwise we fall back to
+        // /proc/PID/stat and convert ticks → ns at the boundary.
+        let snap = match build_snapshot(pid, bpf_tracker) {
+            Some(s) => s,
             None => {
                 tracker.remove(pid);
+                if let Some(b) = &bpf_tracker {
+                    b.forget(pid);
+                }
                 debug!(
                     pid,
                     profile,
@@ -342,18 +388,7 @@ fn scan_cycle(
                 continue;
             }
         };
-
-        let snap = ProcSnapshot {
-            pid,
-            starttime,
-            utime,
-            stime,
-        };
-        let is_idle = tracker.update(
-            snap,
-            config.cpu_delta_threshold,
-            config.wakeup_delta_threshold,
-        );
+        let is_idle = tracker.update(snap, cpu_delta_ns, wakeup_delta_ns);
         let cycles = tracker.idle_cycles(pid);
 
         if !is_idle {

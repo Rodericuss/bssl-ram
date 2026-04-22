@@ -1,10 +1,11 @@
 //! eBPF-based per-task CPU runtime tracker.
 //!
 //! Loads a BPF program at startup that hooks `raw_tp/sched_switch` and
-//! accumulates per-PID CPU nanoseconds in a kernel hash map. Userspace
-//! reads the map via [`runtime_ns`] each scan cycle instead of opening
-//! and parsing `/proc/PID/stat` for every target — moving the discovery
-//! work from per-cycle file I/O to in-kernel tracepoint accounting.
+//! accumulates per-PID CPU nanoseconds + start_time in kernel hash maps.
+//! Userspace reads both via [`runtime_ns`] and [`starttime_ns`] every
+//! scan cycle instead of opening and parsing `/proc/PID/stat` for every
+//! target — moving the discovery work from per-cycle file I/O to
+//! in-kernel tracepoint accounting. Hot path: zero /proc reads.
 //!
 //! The BPF object is compiled at build time (see `build.rs`) and
 //! embedded into the binary; no external `.o` ships at runtime.
@@ -93,15 +94,31 @@ impl BpfCpuTracker {
         Some(u64::from_ne_bytes(arr))
     }
 
-    /// Drop tracking entries for a PID that exited. Best-effort —
-    /// stale entries are harmless (worst case the same PID gets reused
-    /// later and inherits a high counter, but the tracker's starttime
-    /// guard catches that).
-    #[allow(dead_code)]
+    /// Read `task_struct->start_time` (nanoseconds since boot) for
+    /// `pid`. Captured by the BPF program the first time the task is
+    /// scheduled on a CPU. Returns `None` until that first sched_switch.
+    pub fn starttime_ns(&self, pid: u32) -> Option<u64> {
+        let key = pid.to_ne_bytes();
+        let bytes = self
+            .skel
+            .maps
+            .task_birth
+            .lookup(&key, libbpf_rs::MapFlags::ANY)
+            .ok()
+            .flatten()?;
+        let arr: [u8; 8] = bytes.as_slice().try_into().ok()?;
+        Some(u64::from_ne_bytes(arr))
+    }
+
+    /// Drop tracking entries for a PID that exited. Called by main.rs
+    /// when a target stops being observable so the kernel maps don't
+    /// keep accumulating dead tgids and a same-PID respawn gets a
+    /// fresh starttime/runtime pair.
     pub fn forget(&self, pid: u32) {
         let key = pid.to_ne_bytes();
         let _ = self.skel.maps.task_runtime.delete(&key);
         let _ = self.skel.maps.task_start.delete(&key);
+        let _ = self.skel.maps.task_birth.delete(&key);
         debug!(pid, "bpf cpu tracker: forget");
     }
 }

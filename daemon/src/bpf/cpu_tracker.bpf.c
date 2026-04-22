@@ -47,6 +47,17 @@ struct {
     __type(value, __u64);
 } task_start SEC(".maps");
 
+// task_birth: tgid → task_struct->start_time captured the first time
+// we observe this tgid being scheduled. Used as the per-task identity
+// nonce in the daemon's CpuTracker (PID reuse → different start_time
+// → state wiped). One write per task lifetime; reads are cheap.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, __u32);
+    __type(value, __u64);
+} task_birth SEC(".maps");
+
 // ---------------------------------------------------------------
 // raw_tp/sched_switch fires on every context switch with three args:
 //   ctx->args[0]  bool         preempt
@@ -86,6 +97,15 @@ int handle_sched_switch(struct bpf_raw_tracepoint_args *ctx)
     // Mark the task that just got the CPU.
     if (next_tgid != 0) {
         bpf_map_update_elem(&task_start, &next_tgid, &now, BPF_ANY);
+
+        // Capture birth (start_time) once per task. start_time on
+        // modern kernels is nanoseconds-since-boot; per-task unique +
+        // monotonic, exactly what userspace needs as a PID-reuse nonce.
+        __u64 *seen = bpf_map_lookup_elem(&task_birth, &next_tgid);
+        if (!seen) {
+            __u64 birth = BPF_CORE_READ(next, start_time);
+            bpf_map_update_elem(&task_birth, &next_tgid, &birth, BPF_NOEXIST);
+        }
     }
 
     return 0;

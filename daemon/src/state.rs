@@ -1,18 +1,31 @@
 use std::collections::{HashMap, HashSet};
 
-/// Snapshot of /proc/PID/stat for CPU delta calculation.
+/// Snapshot of a process's CPU position for the idle / wakeup deltas.
 ///
-/// `starttime` (field 22 of /proc/PID/stat, in jiffies since boot) is
-/// tracked per snapshot so the tracker can detect PID reuse: if the
-/// kernel recycles a PID, the new task's starttime is strictly greater
-/// than the old one, and we treat that as a fresh observation instead
-/// of inheriting stale CPU deltas / idle counters / compressed flags.
+/// Both fields use *nanoseconds since some monotonic origin* — the
+/// tracker only ever cares about deltas, so any source works as long
+/// as it is monotonic per task.
+///
+/// Where the numbers come from in v0.3.0+:
+///
+/// * `cpu_ns` — preferred from the eBPF cpu_tracker map (kernel
+///   accumulates per-tgid runtime on every sched_switch). Falls back
+///   to `(utime + stime) * (1e9 / USER_HZ)` parsed out of
+///   `/proc/PID/stat` when BPF is unavailable.
+/// * `starttime` — preferred from BPF (`task_struct->start_time`,
+///   already nanoseconds-since-boot). Falls back to field 22 of
+///   `/proc/PID/stat` (in jiffies, but we compare equality only so
+///   the unit is irrelevant).
+///
+/// Tracking starttime per snapshot lets the daemon detect PID reuse:
+/// if the kernel recycles a PID the new task's starttime is different,
+/// and we treat that as a fresh observation rather than inheriting
+/// stale CPU deltas / idle counters / compressed flags.
 #[derive(Debug, Clone)]
 pub struct ProcSnapshot {
     pub pid: u32,
     pub starttime: u64,
-    pub utime: u64, // user mode ticks
-    pub stime: u64, // kernel mode ticks
+    pub cpu_ns: u64,
 }
 
 /// Tracks CPU usage history per PID to detect idle processes
@@ -46,31 +59,31 @@ impl CpuTracker {
     /// is eligible for compression again.
     /// Update snapshot and return whether the process is currently idle.
     ///
-    /// Two thresholds, two questions:
+    /// Two thresholds, two questions, both in **nanoseconds**:
     ///
-    ///   * `cpu_delta_threshold` answers **"is this idle right now?"** —
-    ///     a small budget (default 2 ticks ≈ 20ms of CPU per cycle).
-    ///     Below it, the idle-cycle counter accrues toward compression;
-    ///     above it, the counter resets.
+    ///   * `cpu_delta_threshold_ns` answers **"is this idle right
+    ///     now?"** — a small budget (default 20 000 000 ns ≈ 20ms of
+    ///     CPU per cycle). Below it, the idle-cycle counter accrues
+    ///     toward compression; above it, the counter resets.
     ///
-    ///   * `wakeup_delta_threshold` answers **"did the user actually
+    ///   * `wakeup_delta_threshold_ns` answers **"did the user actually
     ///     interact with this process?"** — a much higher bar (default
-    ///     50 ticks ≈ 500ms of CPU per cycle). Only crossing this clears
-    ///     the anti-recompression flag.
+    ///     500 000 000 ns ≈ 500ms of CPU per cycle). Only crossing this
+    ///     clears the anti-recompression flag.
     ///
     /// Why two? Firefox / Chromium content procs fire GC, service-worker
-    /// pulses, and internal timers that briefly burn 5–30 ticks even
-    /// while the tab is unattended. Without a separate wakeup bar, every
-    /// such micro-burst clears the `compressed` flag and the next idle
-    /// cycle re-issues `process_madvise` on pages that are already in
-    /// zram — burning CPU and growing zstd churn for no benefit. Live
-    /// repro showed PIDs being compressed 3× in 90s; with the dual
-    /// threshold each PID is compressed once until real user activity.
+    /// pulses, and internal timers that briefly burn 5–30ms even while
+    /// the tab is unattended. Without a separate wakeup bar, every such
+    /// micro-burst clears the `compressed` flag and the next idle cycle
+    /// re-issues `process_madvise` on pages that are already in zram —
+    /// burning CPU and growing zstd churn for no benefit. Live repro
+    /// showed PIDs being compressed 3× in 90s; with the dual threshold
+    /// each PID is compressed once until real user activity.
     pub fn update(
         &mut self,
         snap: ProcSnapshot,
-        cpu_delta_threshold: u64,
-        wakeup_delta_threshold: u64,
+        cpu_delta_threshold_ns: u64,
+        wakeup_delta_threshold_ns: u64,
     ) -> bool {
         let pid = snap.pid;
 
@@ -89,15 +102,15 @@ impl CpuTracker {
         }
 
         let delta = if let Some(prev) = self.snapshots.get(&pid) {
-            (snap.utime + snap.stime).saturating_sub(prev.utime + prev.stime)
+            snap.cpu_ns.saturating_sub(prev.cpu_ns)
         } else {
             // First snapshot — no delta available. Treat as active so a
             // freshly-spawned tab isn't compressed before we have any
             // idea what it's doing.
             u64::MAX
         };
-        let idle = delta <= cpu_delta_threshold;
-        let woke_up = delta > wakeup_delta_threshold && delta != u64::MAX;
+        let idle = delta <= cpu_delta_threshold_ns;
+        let woke_up = delta > wakeup_delta_threshold_ns && delta != u64::MAX;
 
         self.snapshots.insert(pid, snap);
 
@@ -171,6 +184,13 @@ impl CpuTracker {
 mod tests {
     use super::*;
 
+    /// Tests pre-v0.3.0 expressed CPU as `(utime_ticks, stime_ticks)`.
+    /// Multiplying the sum by 10 000 000 keeps the same numeric meaning
+    /// in the new ns world (1 tick = 10ms = 10 000 000 ns at the
+    /// default USER_HZ=100), so the threshold values in the assertions
+    /// below scale linearly without changing semantics.
+    const TICK_NS: u64 = 10_000_000;
+
     fn snap(pid: u32, u: u64, s: u64) -> ProcSnapshot {
         snap_at(pid, u, s, 1000)
     }
@@ -179,9 +199,13 @@ mod tests {
         ProcSnapshot {
             pid,
             starttime,
-            utime: u,
-            stime: s,
+            cpu_ns: (u + s) * TICK_NS,
         }
+    }
+
+    /// Convert a tick-based threshold into the ns the new API expects.
+    fn ticks(t: u64) -> u64 {
+        t * TICK_NS
     }
 
     #[test]
@@ -190,50 +214,50 @@ mod tests {
         // treat as active. Keeps a freshly-spawned tab from being instantly
         // compressed before we have any idea what it's doing.
         let mut t = CpuTracker::new();
-        assert!(!t.update(snap(1, 100, 50), 2, 50));
+        assert!(!t.update(snap(1, 100, 50), ticks(2), ticks(50)));
         assert_eq!(t.idle_cycles(1), 0);
     }
 
     #[test]
     fn idle_cycles_accumulate_then_reset_on_activity() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 100, 50), 2, 50); // first sample
-        assert!(t.update(snap(1, 100, 50), 2, 50)); // delta 0 — idle
+        t.update(snap(1, 100, 50), ticks(2), ticks(50)); // first sample
+        assert!(t.update(snap(1, 100, 50), ticks(2), ticks(50))); // delta 0 — idle
         assert_eq!(t.idle_cycles(1), 1);
-        assert!(t.update(snap(1, 101, 50), 2, 50)); // delta 1 — still under threshold
+        assert!(t.update(snap(1, 101, 50), ticks(2), ticks(50))); // delta 1 — still under threshold
         assert_eq!(t.idle_cycles(1), 2);
-        assert!(!t.update(snap(1, 200, 50), 2, 50)); // delta 99 — active, reset
+        assert!(!t.update(snap(1, 200, 50), ticks(2), ticks(50))); // delta 99 — active, reset
         assert_eq!(t.idle_cycles(1), 0);
     }
 
     #[test]
     fn delta_exactly_at_threshold_is_idle() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         // total delta = 2 (utime+stime), threshold = 2 ⇒ "delta <= threshold" ⇒ idle
-        assert!(t.update(snap(1, 1, 1), 2, 50));
+        assert!(t.update(snap(1, 1, 1), ticks(2), ticks(50)));
     }
 
     #[test]
     fn compressed_flag_persists_across_idle_cycles() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         assert!(t.is_compressed(1));
         // Another idle tick must NOT clear the flag — the whole point is
         // to keep skipping this PID until it shows activity.
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         assert!(t.is_compressed(1));
     }
 
     #[test]
     fn compressed_flag_clears_on_activity() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         assert!(t.is_compressed(1));
-        t.update(snap(1, 100, 100), 2, 50); // big delta ⇒ active
+        t.update(snap(1, 100, 100), ticks(2), ticks(50)); // big delta ⇒ active
         assert!(!t.is_compressed(1));
     }
 
@@ -248,8 +272,8 @@ mod tests {
         // the *wakeup* threshold count as real activity.
         let mut t = CpuTracker::new();
         // Establish baseline + idle + compressed
-        t.update(snap(1, 0, 0), 2, 50);
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         assert!(t.is_compressed(1));
 
@@ -257,7 +281,7 @@ mod tests {
         // technically "active" this cycle so idle_cycles drops to 0,
         // but the compressed flag MUST NOT be cleared — pages are
         // still in zram, the burst was browser internal noise.
-        let still_idle = t.update(snap(1, 6, 4), 2, 50);
+        let still_idle = t.update(snap(1, 6, 4), ticks(2), ticks(50));
         assert!(
             !still_idle,
             "burst > cpu_delta_threshold ⇒ not idle this cycle"
@@ -276,10 +300,10 @@ mod tests {
         // memory) must clear compressed so the next idle period is
         // eligible for compression again.
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         // Delta = 200 ticks (2s of CPU) — clearly real activity
-        let still_idle = t.update(snap(1, 100, 100), 2, 50);
+        let still_idle = t.update(snap(1, 100, 100), ticks(2), ticks(50));
         assert!(!still_idle);
         assert!(
             !t.is_compressed(1),
@@ -298,7 +322,7 @@ mod tests {
         // Pretend this PID was already marked compressed (e.g. carried
         // across a refactor / future state restore)
         t.mark_compressed(1);
-        let idle = t.update(snap(1, 100, 100), 2, 50);
+        let idle = t.update(snap(1, 100, 100), ticks(2), ticks(50));
         assert!(!idle, "first observation is treated as active");
         assert!(
             t.is_compressed(1),
@@ -315,14 +339,14 @@ mod tests {
         let mut t = CpuTracker::new();
 
         // Old task: compressed, fully tracked
-        t.update(snap_at(42, 100, 50, 1000), 2, 50);
-        t.update(snap_at(42, 100, 50, 1000), 2, 50); // idle
+        t.update(snap_at(42, 100, 50, 1000), ticks(2), ticks(50));
+        t.update(snap_at(42, 100, 50, 1000), ticks(2), ticks(50)); // idle
         t.mark_compressed(42);
         assert!(t.is_compressed(42));
         assert_eq!(t.idle_cycles(42), 1);
 
         // Same PID, but starttime advanced — kernel recycled it
-        let still_idle = t.update(snap_at(42, 999, 999, 5000), 2, 50);
+        let still_idle = t.update(snap_at(42, 999, 999, 5000), ticks(2), ticks(50));
 
         // Fresh task: no inherited state
         assert!(!still_idle, "new task must be treated as first observation");
@@ -337,9 +361,9 @@ mod tests {
     fn retain_only_drops_pids_not_in_live_set() {
         use std::collections::HashSet;
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
-        t.update(snap(2, 0, 0), 2, 50);
-        t.update(snap(3, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
+        t.update(snap(2, 0, 0), ticks(2), ticks(50));
+        t.update(snap(3, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         t.mark_compressed(2);
 
@@ -356,7 +380,7 @@ mod tests {
     fn retain_only_with_empty_live_set_clears_everything() {
         use std::collections::HashSet;
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         t.retain_only(&HashSet::new());
         assert_eq!(t.tracked_pids(), 0);
@@ -365,7 +389,7 @@ mod tests {
     #[test]
     fn remove_clears_all_tracking_state_for_pid() {
         let mut t = CpuTracker::new();
-        t.update(snap(1, 0, 0), 2, 50);
+        t.update(snap(1, 0, 0), ticks(2), ticks(50));
         t.mark_compressed(1);
         t.remove(1);
         assert!(!t.is_compressed(1));
@@ -379,8 +403,8 @@ mod tests {
         // smaller "current" values doesn't underflow into a huge delta
         // that would falsely flag the process as wildly active.
         let mut t = CpuTracker::new();
-        t.update(snap(1, 1000, 1000), 2, 50);
-        assert!(t.update(snap(1, 100, 100), 2, 50)); // would underflow without saturating_sub
+        t.update(snap(1, 1000, 1000), ticks(2), ticks(50));
+        assert!(t.update(snap(1, 100, 100), ticks(2), ticks(50))); // would underflow without saturating_sub
         assert_eq!(t.idle_cycles(1), 1);
     }
 }
