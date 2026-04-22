@@ -89,16 +89,20 @@ fn read_anonymous_regions(pid: u32) -> Result<Vec<(usize, usize)>> {
 
 /// Returns RSS in MiB for a process by reading /proc/PID/smaps_rollup.
 pub fn rss_mib(pid: u32) -> u64 {
-    fs::read_to_string(format!("/proc/{}/smaps_rollup", pid))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Rss:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-        / 1024
+    let path = format!("/proc/{}/smaps_rollup", pid);
+    match fs::read_to_string(&path) {
+        Ok(s) => s
+            .lines()
+            .find(|l| l.starts_with("Rss:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024,
+        Err(e) => {
+            warn!("rss_mib: cannot read {}: {}", path, e);
+            0
+        }
+    }
 }
 
 /// Reads CPU ticks (utime + stime) from /proc/PID/stat.
