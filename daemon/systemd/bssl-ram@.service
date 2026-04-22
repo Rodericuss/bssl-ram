@@ -1,0 +1,61 @@
+[Unit]
+Description=bssl-ram — compress idle Firefox tab memory
+Documentation=https://github.com/gabrielmaialva33/bssl-ram
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bssl-ram
+Restart=on-failure
+RestartSec=5s
+
+# This MUST be a system service (not a `--user` unit). User services run
+# in a separate user namespace, and capabilities granted inside a child
+# userns don't satisfy ptrace_may_access() against processes in the init
+# userns — so ambient CAP_SYS_PTRACE wouldn't actually bypass Yama.
+#
+# The system instance forks as root, drops to User=/Group=, and keeps the
+# ambient capabilities we list below.
+User=%i
+Group=%i
+
+# Capabilities ----------------------------------------------------------------
+# process_madvise() on another process needs:
+#   1. CAP_SYS_NICE  — clears the capability gate added in 5.12
+#   2. ptrace_may_access(PTRACE_MODE_ATTACH_FSCREDS) on the target
+#
+# Same-UID alone satisfies (2) on Yama ptrace_scope=0, but Arch and most
+# distros ship ptrace_scope=1 (restricted), which only allows attach to
+# direct descendants. Reading /proc/PID/smaps_rollup also goes through
+# the same ptrace check. CAP_SYS_PTRACE bypasses Yama entirely, so we
+# need both capabilities to work on a default Arch box without asking
+# the user to lower ptrace_scope.
+AmbientCapabilities=CAP_SYS_NICE CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE
+
+# Sandboxing ------------------------------------------------------------------
+# Kept minimal. Aggressive options like ProtectKernelTunables, PrivateUsers,
+# RestrictNamespaces and SystemCallFilter end up blocking ptrace_may_access()
+# checks that the kernel performs when reading /proc/PID/smaps_rollup or
+# calling process_madvise on another process — even with CAP_SYS_PTRACE
+# explicitly granted. We trade some hardening surface for actually working.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+LockPersonality=true
+
+# Resource limits -------------------------------------------------------------
+MemoryHigh=64M
+MemoryMax=128M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target
