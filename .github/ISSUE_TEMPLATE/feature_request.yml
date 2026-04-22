@@ -1,0 +1,84 @@
+name: Feature request
+description: Suggest a new capability, config knob, or behavior.
+title: "feat: <short summary>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        bssl-ram keeps a narrow scope on purpose: it exists to whisper
+        `MADV_PAGEOUT` to idle renderers. Features that move us toward a
+        general-purpose memory manager, a tray UI, or a configuration GUI
+        are usually out of scope.
+
+        That said, thoughtful proposals are welcome. Please spend a minute
+        on the motivation — a good problem description is half the PR.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: This is not a new app profile (use the *Profile request* template for that).
+          required: true
+        - label: This is not a security report.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What's the pain today? Who hits it? How often? A concrete scenario
+        beats a generic feature wish.
+      placeholder: |
+        When I watch a YouTube stream in Firefox, audio glitches briefly
+        whenever bssl-ram compresses the media decoder renderer, because...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: |
+        What should happen instead? If there's a config shape, sketch the
+        TOML. If there's a new syscall or cap, call it out.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What else did you think of, and why is your proposal better?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope impact
+      description: Be honest about how big this would be.
+      options:
+        - Config knob only — default stays the same
+        - New code path, opt-in behind a flag
+        - Changes default behavior
+        - New external dependency (D-Bus, extra syscall, new cap)
+        - Breaking change to config / systemd unit
+    validations:
+      required: true
+
+  - type: textarea
+    id: willing
+    attributes:
+      label: Willing to contribute?
+      description: |
+        No obligation — just useful to know. "Happy to help test on 6.8"
+        is a valid answer.
+      placeholder: "I can send a PR / I can test on Arch+ext4 / not able to implement."
+    validations:
+      required: false
