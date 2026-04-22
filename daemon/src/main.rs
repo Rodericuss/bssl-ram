@@ -72,10 +72,13 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker) {
     for t in &targets {
         *by_profile.entry(t.profile.as_str()).or_insert(0) += 1;
     }
-    let summary: Vec<String> = by_profile
+    let mut summary: Vec<String> = by_profile
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
+    // Stable log order (HashMap iteration is randomised) so the output is
+    // grep-friendly across cycles.
+    summary.sort();
     info!(
         "found {} target processes ({})",
         targets.len(),
