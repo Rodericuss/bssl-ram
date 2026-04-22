@@ -1,7 +1,13 @@
-#[path = "../src/scanner.rs"]
-mod scanner;
+// Inline-includes the daemon modules so the example can call them
+// without going through a lib crate. The allow blocks below silence
+// the dead-code/clippy noise that comes from pulling in unrelated
+// items.
+#![allow(dead_code, unused_imports, clippy::all)]
+
 #[path = "../src/compressor.rs"]
 mod compressor;
+#[path = "../src/scanner.rs"]
+mod scanner;
 
 use std::collections::HashMap;
 use std::thread::sleep;

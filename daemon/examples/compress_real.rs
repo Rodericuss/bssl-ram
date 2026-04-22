@@ -1,7 +1,9 @@
-#[path = "../src/scanner.rs"]
-mod scanner;
+#![allow(dead_code, unused_imports, clippy::all)]
+
 #[path = "../src/compressor.rs"]
 mod compressor;
+#[path = "../src/scanner.rs"]
+mod scanner;
 
 use std::fs;
 use std::thread::sleep;

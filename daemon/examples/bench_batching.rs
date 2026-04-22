@@ -8,6 +8,8 @@
 // same iovec walk, same TLB shootdown — but no zram churn between runs,
 // so the timing comparison is honest.
 
+#![allow(dead_code, unused_imports, clippy::all)]
+
 #[path = "../src/compressor.rs"]
 mod compressor;
 
@@ -126,7 +128,12 @@ fn main() {
             iov_len: *n,
         })
         .collect();
-    println!("{} private-anon regions ({} chunks of {})", iovs.len(), iovs.len().div_ceil(IOV_MAX), IOV_MAX);
+    println!(
+        "{} private-anon regions ({} chunks of {})",
+        iovs.len(),
+        iovs.len().div_ceil(IOV_MAX),
+        IOV_MAX
+    );
 
     let pidfd = open_pidfd(pid);
 
@@ -137,8 +144,16 @@ fn main() {
     let (b2, t2, chunks) = batched(pidfd, &iovs);
 
     println!("\n=== results (MADV_COLD, no actual swap I/O) ===");
-    println!("one-per-call : {:>4} syscalls, advised {:>10} bytes, took {:?}", iovs.len(), b1, t1);
-    println!("batched      : {:>4} syscalls, advised {:>10} bytes, took {:?}", chunks, b2, t2);
+    println!(
+        "one-per-call : {:>4} syscalls, advised {:>10} bytes, took {:?}",
+        iovs.len(),
+        b1,
+        t1
+    );
+    println!(
+        "batched      : {:>4} syscalls, advised {:>10} bytes, took {:?}",
+        chunks, b2, t2
+    );
 
     let speedup = t1.as_nanos() as f64 / t2.as_nanos().max(1) as f64;
     let syscall_reduction = iovs.len() as f64 / chunks.max(1) as f64;

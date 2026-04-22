@@ -20,9 +20,7 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     info!(
         "bssl-ram starting — scan every {}s, idle threshold: {} cycles, cpu delta: {} ticks",
-        config.scan_interval_secs,
-        config.idle_cycles_threshold,
-        config.cpu_delta_threshold,
+        config.scan_interval_secs, config.idle_cycles_threshold, config.cpu_delta_threshold,
     );
 
     if config.dry_run {

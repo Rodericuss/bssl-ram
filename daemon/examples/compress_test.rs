@@ -1,7 +1,9 @@
-#[path = "../src/scanner.rs"]
-mod scanner;
+#![allow(dead_code, unused_imports, clippy::all)]
+
 #[path = "../src/compressor.rs"]
 mod compressor;
+#[path = "../src/scanner.rs"]
+mod scanner;
 
 use std::fs;
 
@@ -73,7 +75,10 @@ fn main() {
     println!("RSS: {} MiB", rss);
 
     let regions = parse_anon_regions(target);
-    println!("\nFound {} anonymous regions with anon pages:", regions.len());
+    println!(
+        "\nFound {} anonymous regions with anon pages:",
+        regions.len()
+    );
 
     let mut by_perms: std::collections::HashMap<String, (usize, u64)> = Default::default();
     let mut total_kb = 0u64;
@@ -96,7 +101,10 @@ fn main() {
 
     println!("Total anon kb: {} ({} MiB)", total_kb, total_kb / 1024);
     println!("Shared (NOT 'p') kb: {}", shared);
-    println!("File-backed (inode != 0) but with anon kb: {}", not_anon_inode);
+    println!(
+        "File-backed (inode != 0) but with anon kb: {}",
+        not_anon_inode
+    );
     println!("\nBy permission set:");
     for (perms, (count, kb)) in &by_perms {
         println!("  {}  count={:>4}  anon_kb={:>10}", perms, count, kb);
