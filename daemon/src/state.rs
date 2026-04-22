@@ -14,6 +14,11 @@ pub struct CpuTracker {
     snapshots: HashMap<u32, ProcSnapshot>,
     /// pid → how many consecutive idle cycles
     idle_cycles: HashMap<u32, u32>,
+    /// pid → already compressed since last active period
+    /// Cleared the moment this PID shows a non-idle delta, so the daemon
+    /// will compress it again the *next* time it goes idle — but not
+    /// repeatedly while it stays idle.
+    compressed: HashMap<u32, bool>,
 }
 
 impl CpuTracker {
@@ -21,12 +26,17 @@ impl CpuTracker {
         Self {
             snapshots: HashMap::new(),
             idle_cycles: HashMap::new(),
+            compressed: HashMap::new(),
         }
     }
 
     /// Update snapshot for a PID and return whether it's idle.
     /// A process is idle if its CPU delta (utime + stime) is below
     /// the threshold across consecutive cycles.
+    ///
+    /// Side effect: when a non-idle delta is seen, the "already compressed"
+    /// flag is cleared — the process has woken up, so a future idle period
+    /// is eligible for compression again.
     pub fn update(&mut self, snap: ProcSnapshot, cpu_delta_threshold: u64) -> bool {
         let pid = snap.pid;
         let idle = if let Some(prev) = self.snapshots.get(&pid) {
@@ -44,6 +54,8 @@ impl CpuTracker {
             *self.idle_cycles.entry(pid).or_insert(0) += 1;
         } else {
             self.idle_cycles.insert(pid, 0);
+            // Woke up — eligible for compression again next time it idles
+            self.compressed.remove(&pid);
         }
 
         idle
@@ -54,9 +66,24 @@ impl CpuTracker {
         *self.idle_cycles.get(&pid).unwrap_or(&0)
     }
 
+    /// Returns true if this PID has already been compressed since it last
+    /// showed any CPU activity. Callers should skip compression in that
+    /// case — the pages are already in zram, calling MADV_PAGEOUT again
+    /// only wastes syscalls and walks the same (mostly empty) page tables.
+    pub fn is_compressed(&self, pid: u32) -> bool {
+        self.compressed.get(&pid).copied().unwrap_or(false)
+    }
+
+    /// Mark this PID as compressed. Call this after a successful
+    /// compress_pid() so the next scan cycle skips it.
+    pub fn mark_compressed(&mut self, pid: u32) {
+        self.compressed.insert(pid, true);
+    }
+
     /// Remove tracking data for a PID (process exited)
     pub fn remove(&mut self, pid: u32) {
         self.snapshots.remove(&pid);
         self.idle_cycles.remove(&pid);
+        self.compressed.remove(&pid);
     }
 }
