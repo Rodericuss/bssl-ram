@@ -43,36 +43,41 @@ time.sleep(8)
 }
 
 # Run one variant. args: <label> <config_basename>
+# Watch loop is in tenths-of-a-second (integer math) to keep the
+# script POSIX-bash-arithmetic-clean.
 run_variant() {
     local label="$1" config="$2"
+    # Whitespace in labels would mangle the result filename; the printf
+    # in the summary still gets a padded label below for alignment.
+    local clean_label
+    clean_label=$(echo "$label" | tr -d ' ')
     sudo cp "$CONFIGS/$config" /etc/bssl-ram/config.toml
     sudo setcap "cap_sys_nice,cap_sys_ptrace,cap_sys_resource,cap_net_admin,cap_bpf,cap_perfmon+eip" "$BIN"
 
-    local logfile="$RESULTS/psi-latency-${label}-$stamp.log"
+    local logfile="$RESULTS/psi-latency-${clean_label}-$stamp.log"
     BSSL_LOG_FORMAT=compact RUST_LOG=info "$BIN" >"$logfile" 2>&1 &
     local daemon_pid=$!
-    sleep 3   # let it seed the table + register PSI if applicable
+    sleep 3
 
     local stress_start_ns
     stress_start_ns=$(date +%s%N)
     local stress_pid
     stress_pid=$(spawn_pressure)
 
-    # Watch the log for first compress event.
-    local timeout_s=25
-    local elapsed=0
+    # Poll every 100 ms (10 ticks/s) up to 25s = 250 ticks.
     local first_compress_ns=0
-    while (( elapsed < timeout_s )); do
-        if grep -q '"page-out done"' "$logfile"; then
-            local first_line
-            first_line=$(grep -m1 '"page-out done"' "$logfile" | sed 's/\x1b\[[0-9;]*m//g')
+    local tick=0
+    while (( tick < 250 )); do
+        if grep -q 'page-out done' "$logfile" 2>/dev/null; then
             local first_ts
-            first_ts=$(echo "$first_line" | grep -oE '^[0-9-]+T[0-9:]+\.[0-9]+Z')
+            first_ts=$(grep -m1 'page-out done' "$logfile" \
+                | sed 's/\x1b\[[0-9;]*m//g' \
+                | grep -oE '^[0-9-]+T[0-9:]+\.[0-9]+Z')
             first_compress_ns=$(date -d "$first_ts" +%s%N 2>/dev/null || echo 0)
             break
         fi
         sleep 0.1
-        elapsed=$(awk -v e="$elapsed" 'BEGIN { print e + 0.1 }')
+        tick=$(( tick + 1 ))
     done
 
     kill -TERM "$daemon_pid" 2>/dev/null || true
@@ -81,7 +86,7 @@ run_variant() {
     wait "$stress_pid" 2>/dev/null || true
 
     if [[ "$first_compress_ns" == "0" ]]; then
-        printf '%s | reaction = NO COMPRESS WITHIN %ds\n' "$label" "$timeout_s" | tee -a "$out"
+        printf '%s | reaction = NO COMPRESS WITHIN 25s\n' "$label" | tee -a "$out"
     else
         local lat_ms
         lat_ms=$(awk -v s="$stress_start_ns" -v e="$first_compress_ns" \

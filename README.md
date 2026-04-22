@@ -126,19 +126,84 @@ app doesn't know its pages moved.
 
 ---
 
-## 📊 What actually happens
+## 📊 Benchmarks (v0.3.0)
 
-Measured on a real Firefox tab with 588 MiB RSS, using `examples/compress_real.rs`:
+Numbers below come from the reproducible suite in [`bench/`](./bench/) — run
+the scripts yourself and compare. Methodology + caveats in
+[`bench/README.md`](./bench/README.md). Kernel: Linux 6.19.12-zen1-1-zen. The
+workload is the author's own idle Firefox + Chromium + Electron session
+(typical: ~20 renderer-ish targets).
 
-| Metric           |  Before |   After |                      Δ |
-|:-----------------|--------:|--------:|-----------------------:|
-| **RSS**          | 588 MiB | 171 MiB |    **−417 MiB (−70%)** |
-| **PSS**          | 493 MiB |  65 MiB |               −428 MiB |
-| **Swap (zram)**  |   3 MiB | 374 MiB |           **+374 MiB** |
-| **Syscall time** |       — |       — | 1.38s for 1000 regions |
+### A — Daemon CPU per discovery mode (dry-run, 300s windows)
 
-Net physical RAM returned to the system after zstd compression: about **260 MiB** from a single tab. Firefox continued
-running. The tab, when switched back to, was indistinguishable from a non-compressed one.
+Each config runs 150 scan cycles (`scan_interval_secs=2`, `dry_run=true`).
+CPU sampled from `/proc/<daemon-pid>/stat` at 2 s and 302 s.
+
+| Config                         |  CPU in 300 s |  avg CPU % | vs /proc baseline |
+|:-------------------------------|--------------:|-----------:|------------------:|
+| `/proc` walk + `/proc/PID/stat`|       280 ms  | **0.093 %**|              —    |
+| cn_proc + `/proc/PID/stat`     |       250 ms  |   0.083 %  |         **−11 %** |
+| cn_proc + **eBPF** (v0.3.0)    |       240 ms  |   0.080 %  |         **−14 %** |
+
+Take-away: every layer ran with a large, busy workload on the machine and the
+daemon still sat below **0.1 % CPU** in steady state. The absolute numbers are
+low because the per-cycle work is already microseconds — the interesting signal
+is that each TIER-S feature shaves another bite off of an already tiny budget.
+
+### B — Reaction latency under induced memory pressure (14 GiB alloc)
+
+A child process allocates 14 GiB and touches every page. We time from the
+allocation starting to the first `page-out done` line in the daemon's log.
+
+| Mode                                   |  Time to first compress |
+|:---------------------------------------|------------------------:|
+| `psi_enabled = true`  (event-driven)   |           **~3.4 s** *  |
+| `psi_enabled = false` (timer, 10 s)    |               ~17.0 s   |
+
+*\*The 3.4 s is dominated by the Python allocation phase itself — the gap between
+the kernel crossing the PSI threshold and the daemon's first `cycle: scan
+complete trigger="psi-pressure"` log line is sub-millisecond (see `bench/results/psi-latency-*.log`).*
+
+### C — Real compression of the largest renderer (one-shot)
+
+Picked the biggest `--type=renderer` PID currently alive and ran
+`bench/scripts/bench-real-compress.sh`.
+
+| Metric           |  Before |   After |                     Δ |
+|:-----------------|--------:|--------:|----------------------:|
+| **RSS**          | 300 MiB | 191 MiB |    **−109 MiB (−36 %)**|
+| **PSS**          | 162 MiB |  50 MiB |              −112 MiB |
+| **Swap (zram)**  |  13 MiB | 122 MiB |         **+109 MiB**  |
+| **Anonymous**    | 128 MiB |  19 MiB |              −109 MiB |
+| **Syscall time** |       — |       — | **398 ms for 669 regions (1 batch)** |
+
+Chrome never noticed. The tab kept scrolling, and the only user-visible
+effect on the next switch-to was a faint page-fault ramp.
+
+### E — Recompression cascade prevention (aggressive 90 s)
+
+`idle_cycles_threshold = 1`, `scan_interval_secs = 5`, so every target becomes
+eligible for compression every 5 s. Without the dual-threshold guard (v0.1.x
+behaviour) browsers' GC pulses flipped the anti-recompression flag and PIDs
+got paged out multiple times inside the window.
+
+| Metric                  |        v0.3.0 | v0.1.x (same workload, re-run before the fix) |
+|:------------------------|--------------:|----------------------------------------------:|
+| Total compress events   |        **14** |                                             9 |
+| Unique PIDs compressed  |        **14** |                                             6 |
+| Recompressions          |         **0** |                                             3 |
+| Recompression rate      |      **0 %**  |                                        33.3 % |
+
+v0.3.0 compressed **every eligible target exactly once** across the 90 s
+window; the pre-fix number is from the live repro we did before landing the
+dual threshold (`c0acaf3`).
+
+### Historical reference — a bigger tab
+
+Earlier development run, kept here because it pins the "how far can it
+go in one shot" envelope — a 588 MiB Firefox tab gave back **−417 MiB
+(−70 % RSS)** with **+374 MiB** of zram growth (~260 MiB real RAM
+returned to the system after zstd compression).
 
 ---
 
