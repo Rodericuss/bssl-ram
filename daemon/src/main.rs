@@ -1,20 +1,86 @@
 mod compressor;
 mod config;
-mod server;
+mod scanner;
 mod state;
 mod zram;
 
 use anyhow::Result;
-use tracing::info;
+use compressor::{compress_pid, read_cpu_ticks, rss_mib};
+use config::Config;
+use scanner::scan_firefox_tabs;
+use state::{CpuTracker, ProcSnapshot};
+use std::time::Duration;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = config::Config::load()?;
-    info!("bssl-ram starting — idle threshold: {}s", config.idle_threshold_secs);
+    let config = Config::load()?;
+    info!(
+        "bssl-ram starting — scan every {}s, idle threshold: {} cycles, cpu delta: {} ticks",
+        config.scan_interval_secs,
+        config.idle_cycles_threshold,
+        config.cpu_delta_threshold,
+    );
+
+    if config.dry_run {
+        info!("DRY RUN mode — no actual compression will happen");
+    }
 
     zram::ensure_zram_swap(&config)?;
 
-    server::run(config).await
+    let mut tracker = CpuTracker::new();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(config.scan_interval_secs)).await;
+
+        let tabs = scan_firefox_tabs();
+        info!("found {} Firefox tab processes", tabs.len());
+
+        for tab in &tabs {
+            let pid = tab.pid;
+
+            // Read current CPU ticks
+            let (utime, stime) = match read_cpu_ticks(pid) {
+                Some(t) => t,
+                None => {
+                    // Process exited between scan and now
+                    tracker.remove(pid);
+                    continue;
+                }
+            };
+
+            let snap = ProcSnapshot { pid, utime, stime };
+            let is_idle = tracker.update(snap, config.cpu_delta_threshold);
+            let cycles = tracker.idle_cycles(pid);
+
+            if !is_idle {
+                continue;
+            }
+
+            if cycles < config.idle_cycles_threshold {
+                info!(
+                    "pid {} idle for {}/{} cycles — waiting",
+                    pid, cycles, config.idle_cycles_threshold
+                );
+                continue;
+            }
+
+            // Check RSS threshold
+            let rss = rss_mib(pid);
+            if rss < config.min_rss_mib {
+                info!(
+                    "pid {} idle but RSS {}MiB < threshold {}MiB — skipping",
+                    pid, rss, config.min_rss_mib
+                );
+                continue;
+            }
+
+            // Compress
+            if let Err(e) = compress_pid(pid, config.dry_run) {
+                warn!("failed to compress pid {}: {}", pid, e);
+            }
+        }
+    }
 }
