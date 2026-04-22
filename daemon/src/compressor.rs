@@ -125,7 +125,21 @@ pub fn rss_mib(pid: u32) -> u64 {
 ///
 /// Pure function over the stat string so it can be unit-tested with
 /// fixtures rather than a live /proc.
-pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
+/// Parses the `(starttime, utime, stime)` triple out of a /proc/PID/stat
+/// string. Tracked together because the CpuTracker needs starttime as
+/// part of the process identity to detect PID reuse.
+///
+/// /proc/PID/stat field layout (proc(5)):
+///   1 pid  2 (comm)  3 state ... 14 utime  15 stime ... 22 starttime
+///
+/// Anchoring on the last `)` in the string skips pid + comm regardless
+/// of how many spaces or nested parens the comm contains. After that
+/// split_whitespace gives us `fields[0] = state`, so field indices drop
+/// by 3: utime=11, stime=12, starttime=19.
+///
+/// Pure function over the stat string so it can be unit-tested with
+/// fixtures rather than a live /proc.
+pub fn parse_proc_stats(stat: &str) -> Option<(u64, u64, u64)> {
     let after_comm = stat.rfind(')')?;
     // Defensive slicing: the API contract is `Option`, so a truncated
     // stat ("1 (init)", "a)", ")") must return None instead of panicking
@@ -135,20 +149,34 @@ pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
     let rest = stat.get(after..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
 
-    // After the closing paren: state(0) ppid(1) pgrp(2) session(3)
-    // tty_nr(4) tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9)
-    // cmajflt(10) utime(11) stime(12)
     let utime = fields.get(11)?.parse::<u64>().ok()?;
     let stime = fields.get(12)?.parse::<u64>().ok()?;
+    let starttime = fields.get(19)?.parse::<u64>().ok()?;
 
+    Some((starttime, utime, stime))
+}
+
+/// Reads `(starttime, utime, stime)` from /proc/PID/stat.
+/// Returns None if the process no longer exists or the stat is malformed.
+pub fn read_proc_stats(pid: u32) -> Option<(u64, u64, u64)> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    parse_proc_stats(&stat)
+}
+
+/// Backwards-compatible wrappers used by the inspection examples (which
+/// pull in this module via `#[path]` and therefore can't see through
+/// the main binary's callers). New code should call `read_proc_stats`
+/// so the starttime is available for identity tracking.
+#[allow(dead_code)]
+pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
+    let (_, utime, stime) = parse_proc_stats(stat)?;
     Some((utime, stime))
 }
 
-/// Reads CPU ticks (utime + stime) from /proc/PID/stat.
-/// Returns None if the process no longer exists or the stat file is malformed.
+#[allow(dead_code)]
 pub fn read_cpu_ticks(pid: u32) -> Option<(u64, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    parse_cpu_ticks(&stat)
+    let (_, utime, stime) = read_proc_stats(pid)?;
+    Some((utime, stime))
 }
 /// Outcome of a single compress_pid call. Returned so the caller can
 /// fold the numbers into telemetry and decide whether to set the
@@ -298,6 +326,31 @@ mod tests {
         assert_eq!(parse_cpu_ticks("no parens here"), None);
         // Truncated stat with no utime field
         assert_eq!(parse_cpu_ticks("1 (init) S 0 1 1"), None);
+    }
+
+    #[test]
+    fn parse_proc_stats_pulls_starttime_field_22() {
+        // Field 22 of /proc/PID/stat is `starttime` (in jiffies since
+        // boot). After anchoring on the last `)` and skipping state+ppid
+        // etc., starttime lands at fields[19]. This test pins the index
+        // math so future refactors can't silently shift the field.
+        let stat = "1 (init) S 0 1 1 0 -1 4194560 100 200 0 0 11 22 0 0 20 0 1 0 100 12345 678";
+        // fields[19] = "100"
+        assert_eq!(parse_proc_stats(stat), Some((100, 11, 22)));
+
+        // Firefox-style comm with spaces — starttime field 22 = 200000
+        let stat = "12345 (Web Content) S 1 12345 12345 0 -1 4194560 100 200 0 0 658 59 0 0 20 0 1 0 200000 90000000 145000";
+        assert_eq!(parse_proc_stats(stat), Some((200000, 658, 59)));
+    }
+
+    #[test]
+    fn parse_proc_stats_returns_none_when_starttime_missing() {
+        // Truncated after stime — no starttime available, so the
+        // identity tuple is incomplete and we must return None rather
+        // than fabricate a zero (which would masquerade as a real
+        // starttime in the tracker and defeat the PID-reuse guard).
+        let stat = "1 (init) S 0 1 1 0 -1 4194560 100 200 0 0 11 22";
+        assert_eq!(parse_proc_stats(stat), None);
     }
 
     #[test]

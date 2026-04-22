@@ -6,11 +6,11 @@ mod telemetry;
 mod zram;
 
 use anyhow::Result;
-use compressor::{compress_pid, read_cpu_ticks, rss_mib};
+use compressor::{compress_pid, read_proc_stats, rss_mib};
 use config::Config;
 use scanner::scan_targets;
 use state::{CpuTracker, ProcSnapshot};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use telemetry::Stats;
@@ -116,11 +116,17 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
         "scan complete"
     );
 
+    // Seen-this-cycle set feeds the end-of-cycle GC that drops tracker
+    // state for PIDs we no longer observe at all (never coming back,
+    // not PID-reused either — just gone).
+    let mut seen_pids: HashSet<u32> = HashSet::with_capacity(targets.len());
+
     for tab in &targets {
         let pid = tab.pid;
         let profile = tab.profile.as_str();
+        seen_pids.insert(pid);
 
-        let (utime, stime) = match read_cpu_ticks(pid) {
+        let (starttime, utime, stime) = match read_proc_stats(pid) {
             Some(t) => t,
             None => {
                 tracker.remove(pid);
@@ -135,7 +141,12 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
             }
         };
 
-        let snap = ProcSnapshot { pid, utime, stime };
+        let snap = ProcSnapshot {
+            pid,
+            starttime,
+            utime,
+            stime,
+        };
         let is_idle = tracker.update(snap, config.cpu_delta_threshold);
         let cycles = tracker.idle_cycles(pid);
 
@@ -268,12 +279,29 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
         }
     }
 
+    // End-of-cycle GC: drop tracker state for every PID we did NOT see
+    // in this scan. The PID-reuse guard in CpuTracker::update() already
+    // protects PIDs that come back; this sweeps orphans that just
+    // vanished (Firefox kills a content proc, Chrome tab navigates
+    // away, Electron app quits, etc.).
+    let pre = tracker.tracked_pids();
+    tracker.retain_only(&seen_pids);
+    let post = tracker.tracked_pids();
+    if pre > post {
+        debug!(
+            dropped = pre - post,
+            remaining = post,
+            "tracker gc: dropped stale PIDs"
+        );
+    }
+
     // Quick per-cycle counters, useful when grep-ing live output instead
     // of waiting for the next telemetry snapshot.
     debug!(
         scanned = stats.scans.load(Ordering::Relaxed),
         compressions = stats.compressions.load(Ordering::Relaxed),
         bytes_mib = stats.bytes_paged_out.load(Ordering::Relaxed) / 1024 / 1024,
+        tracked_pids = post,
         "running totals"
     );
 }

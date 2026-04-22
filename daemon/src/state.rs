@@ -1,9 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// Snapshot of /proc/PID/stat for CPU delta calculation
+/// Snapshot of /proc/PID/stat for CPU delta calculation.
+///
+/// `starttime` (field 22 of /proc/PID/stat, in jiffies since boot) is
+/// tracked per snapshot so the tracker can detect PID reuse: if the
+/// kernel recycles a PID, the new task's starttime is strictly greater
+/// than the old one, and we treat that as a fresh observation instead
+/// of inheriting stale CPU deltas / idle counters / compressed flags.
 #[derive(Debug, Clone)]
 pub struct ProcSnapshot {
     pub pid: u32,
+    pub starttime: u64,
     pub utime: u64, // user mode ticks
     pub stime: u64, // kernel mode ticks
 }
@@ -39,6 +46,21 @@ impl CpuTracker {
     /// is eligible for compression again.
     pub fn update(&mut self, snap: ProcSnapshot, cpu_delta_threshold: u64) -> bool {
         let pid = snap.pid;
+
+        // PID-reuse guard. If we already know about this PID but the
+        // starttime doesn't match, the kernel recycled the PID for a
+        // different task — every byte of state we kept around belongs
+        // to a process that no longer exists. Wiping it here means the
+        // fresh task will be treated as a first-time observation and
+        // won't inherit an "already compressed" flag it never earned.
+        if let Some(prev) = self.snapshots.get(&pid) {
+            if prev.starttime != snap.starttime {
+                self.snapshots.remove(&pid);
+                self.idle_cycles.remove(&pid);
+                self.compressed.remove(&pid);
+            }
+        }
+
         let idle = if let Some(prev) = self.snapshots.get(&pid) {
             let delta = (snap.utime + snap.stime).saturating_sub(prev.utime + prev.stime);
             delta <= cpu_delta_threshold
@@ -85,6 +107,24 @@ impl CpuTracker {
         self.idle_cycles.remove(&pid);
         self.compressed.remove(&pid);
     }
+
+    /// Drop tracking state for every PID not in `live_pids`.
+    ///
+    /// Called at the end of each scan_cycle to bound memory and to
+    /// forget short-lived PIDs that exited between cycles. The
+    /// starttime check in `update()` already catches PID reuse for
+    /// PIDs we see again; this sweeps the orphans that never come back.
+    pub fn retain_only(&mut self, live_pids: &HashSet<u32>) {
+        self.snapshots.retain(|pid, _| live_pids.contains(pid));
+        self.idle_cycles.retain(|pid, _| live_pids.contains(pid));
+        self.compressed.retain(|pid, _| live_pids.contains(pid));
+    }
+
+    /// Current number of PIDs held in the tracker. Mostly useful for
+    /// telemetry and tests that assert the GC actually runs.
+    pub fn tracked_pids(&self) -> usize {
+        self.snapshots.len()
+    }
 }
 
 #[cfg(test)]
@@ -92,8 +132,13 @@ mod tests {
     use super::*;
 
     fn snap(pid: u32, u: u64, s: u64) -> ProcSnapshot {
+        snap_at(pid, u, s, 1000)
+    }
+
+    fn snap_at(pid: u32, u: u64, s: u64, starttime: u64) -> ProcSnapshot {
         ProcSnapshot {
             pid,
+            starttime,
             utime: u,
             stime: s,
         }
@@ -150,6 +195,62 @@ mod tests {
         assert!(t.is_compressed(1));
         t.update(snap(1, 100, 100), 2); // big delta ⇒ active
         assert!(!t.is_compressed(1));
+    }
+
+    #[test]
+    fn pid_reuse_wipes_inherited_state() {
+        // Council-flagged #4: PID rollover means a brand-new task can
+        // end up with the same PID as a compressed-and-forgotten one.
+        // Without the starttime guard it would inherit the `compressed`
+        // flag and never be considered for compression.
+        let mut t = CpuTracker::new();
+
+        // Old task: compressed, fully tracked
+        t.update(snap_at(42, 100, 50, 1000), 2);
+        t.update(snap_at(42, 100, 50, 1000), 2); // idle
+        t.mark_compressed(42);
+        assert!(t.is_compressed(42));
+        assert_eq!(t.idle_cycles(42), 1);
+
+        // Same PID, but starttime advanced — kernel recycled it
+        let still_idle = t.update(snap_at(42, 999, 999, 5000), 2);
+
+        // Fresh task: no inherited state
+        assert!(!still_idle, "new task must be treated as first observation");
+        assert!(
+            !t.is_compressed(42),
+            "compressed flag must NOT carry over on PID reuse"
+        );
+        assert_eq!(t.idle_cycles(42), 0);
+    }
+
+    #[test]
+    fn retain_only_drops_pids_not_in_live_set() {
+        use std::collections::HashSet;
+        let mut t = CpuTracker::new();
+        t.update(snap(1, 0, 0), 2);
+        t.update(snap(2, 0, 0), 2);
+        t.update(snap(3, 0, 0), 2);
+        t.mark_compressed(1);
+        t.mark_compressed(2);
+
+        let live: HashSet<u32> = [2u32, 3].into_iter().collect();
+        t.retain_only(&live);
+
+        assert_eq!(t.tracked_pids(), 2);
+        assert!(!t.is_compressed(1), "pid 1 state must be gone after GC");
+        assert!(t.is_compressed(2), "pid 2 state must survive GC");
+        assert_eq!(t.idle_cycles(1), 0, "pid 1 idle counter must be gone");
+    }
+
+    #[test]
+    fn retain_only_with_empty_live_set_clears_everything() {
+        use std::collections::HashSet;
+        let mut t = CpuTracker::new();
+        t.update(snap(1, 0, 0), 2);
+        t.mark_compressed(1);
+        t.retain_only(&HashSet::new());
+        assert_eq!(t.tracked_pids(), 0);
     }
 
     #[test]
