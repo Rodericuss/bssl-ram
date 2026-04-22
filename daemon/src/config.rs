@@ -40,6 +40,35 @@ pub struct Config {
     #[serde(default = "default_telemetry_interval")]
     pub telemetry_interval_cycles: u64,
 
+    /// Register a PSI (Pressure Stall Information) memory trigger so the
+    /// daemon also wakes up *immediately* when the kernel reports real
+    /// memory pressure, instead of being purely timer-driven. With PSI on,
+    /// `scan_interval_secs` becomes a safety-net cap rather than the only
+    /// wake source — when the system is comfortable the daemon idles
+    /// and burns essentially zero CPU; when pressure spikes it reacts in
+    /// the same cycle.
+    ///
+    /// Requires CAP_SYS_RESOURCE to register the trigger (the systemd
+    /// unit grants it). If registration fails for any reason (kernel
+    /// without CONFIG_PSI, missing cap, etc.) the daemon logs a warning
+    /// and silently falls back to timer-only mode — the rest of the
+    /// pipeline is unchanged.
+    #[serde(default = "default_psi_enabled")]
+    pub psi_enabled: bool,
+
+    /// Cumulative stall threshold in microseconds within
+    /// `psi_window_us`. Defaults to 150 000 (150ms). Lower values fire
+    /// earlier (more reactive, more wake-ups under load); higher values
+    /// only react to severe pressure.
+    #[serde(default = "default_psi_stall_us")]
+    pub psi_stall_threshold_us: u64,
+
+    /// Rolling window in microseconds over which `psi_stall_threshold_us`
+    /// is measured. Defaults to 1 000 000 (1s) — the documented sane
+    /// minimum for PSI triggers.
+    #[serde(default = "default_psi_window_us")]
+    pub psi_window_us: u64,
+
     /// Browser/app profiles used by the scanner. Each profile is a
     /// declarative cmdline-match rule. Defaults to a built-in set covering
     /// Firefox-family + Chromium-family + Electron apps. Users can replace
@@ -65,6 +94,9 @@ impl Default for Config {
             min_rss_mib: 50,
             dry_run: false,
             telemetry_interval_cycles: default_telemetry_interval(),
+            psi_enabled: default_psi_enabled(),
+            psi_stall_threshold_us: default_psi_stall_us(),
+            psi_window_us: default_psi_window_us(),
             profiles: default_profiles(),
         }
     }
@@ -72,6 +104,18 @@ impl Default for Config {
 
 fn default_telemetry_interval() -> u64 {
     60
+}
+
+fn default_psi_enabled() -> bool {
+    true
+}
+
+fn default_psi_stall_us() -> u64 {
+    150_000
+}
+
+fn default_psi_window_us() -> u64 {
+    1_000_000
 }
 
 impl Config {

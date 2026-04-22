@@ -1,5 +1,6 @@
 mod compressor;
 mod config;
+mod psi;
 mod scanner;
 mod state;
 mod telemetry;
@@ -11,10 +12,12 @@ use config::Config;
 use scanner::scan_targets;
 use state::{CpuTracker, ProcSnapshot};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use telemetry::Stats;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::Notify;
 use tracing::{debug, info, info_span, warn};
 
 #[tokio::main]
@@ -46,6 +49,41 @@ async fn main() -> Result<()> {
 
     zram::ensure_zram_swap(&config)?;
 
+    // PSI memory pressure trigger. When the kernel reports that processes
+    // collectively spent > psi_stall_threshold_us waiting on memory inside
+    // any psi_window_us window, we want to scan immediately instead of
+    // waiting for the next timer tick. The blocking thread translates
+    // poll(POLLPRI) events into Notify wake-ups for the async loop.
+    //
+    // If registration fails (kernel without CONFIG_PSI, missing
+    // CAP_SYS_RESOURCE, ...) we log once and stay timer-only — every
+    // other code path keeps working.
+    let psi_notify = Arc::new(Notify::new());
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let psi_active = if config.psi_enabled {
+        match psi::PsiTrigger::open_memory(config.psi_stall_threshold_us, config.psi_window_us) {
+            Ok(trigger) => {
+                info!(
+                    stall_us = config.psi_stall_threshold_us,
+                    window_us = config.psi_window_us,
+                    "PSI memory pressure trigger registered — daemon is event-driven"
+                );
+                spawn_psi_thread(trigger, psi_notify.clone(), shutdown.clone());
+                true
+            }
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    "PSI trigger unavailable — falling back to timer-only mode",
+                );
+                false
+            }
+        }
+    } else {
+        info!("PSI disabled by config — timer-only mode");
+        false
+    };
+
     let mut tracker = CpuTracker::new();
     let stats = Stats::default();
     let mut cycle: u64 = 0;
@@ -55,7 +93,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(config.scan_interval_secs)) => {
                 cycle += 1;
-                scan_cycle(&config, &mut tracker, &stats, cycle);
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer);
 
                 if config.telemetry_interval_cycles > 0
                     && cycle.is_multiple_of(config.telemetry_interval_cycles)
@@ -63,20 +101,84 @@ async fn main() -> Result<()> {
                     stats.emit();
                 }
             }
+            _ = psi_notify.notified() => {
+                // Notified() blocks forever when nobody is sending — so
+                // when PSI is off (psi_active = false) this arm simply
+                // never fires and the timer arm above carries the loop.
+                cycle += 1;
+                stats.inc(&stats.psi_events);
+                // Snapshot current pressure for the log line so the operator
+                // can see *how bad* it was when the scan fired.
+                if let Ok(p) = psi::read_memory() {
+                    info!(
+                        some_avg10 = p.some_avg10,
+                        some_avg60 = p.some_avg60,
+                        full_avg10 = p.full_avg10,
+                        "PSI pressure event — running adaptive scan",
+                    );
+                }
+                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure);
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received — shutting down gracefully");
+                shutdown.store(true, Ordering::Relaxed);
                 stats.emit();
                 break;
             }
             _ = sigterm.recv() => {
                 info!("SIGTERM received — shutting down gracefully");
+                shutdown.store(true, Ordering::Relaxed);
                 stats.emit();
                 break;
             }
         }
     }
 
+    // Surface the chosen mode in the final shutdown line so a journalctl
+    // grep can quickly confirm which path the daemon used in this session.
+    info!(psi_active, "daemon stopping");
     Ok(())
+}
+
+/// Why this scan is happening — surfaces in the per-cycle log so a
+/// `grep trigger=psi-pressure` shows exactly which scans were reactive.
+#[derive(Debug, Clone, Copy)]
+enum ScanTrigger {
+    Timer,
+    PsiPressure,
+}
+
+impl ScanTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScanTrigger::Timer => "timer",
+            ScanTrigger::PsiPressure => "psi-pressure",
+        }
+    }
+}
+
+/// Move PSI's blocking poll loop off the tokio runtime. tokio's AsyncFd
+/// can register POLLIN/POLLOUT but does not expose POLLPRI, which is
+/// what PSI triggers fire on — so a dedicated OS thread is the simplest
+/// correct path. The 5s timeout bounds shutdown latency without having
+/// to wire up an extra eventfd.
+fn spawn_psi_thread(trigger: psi::PsiTrigger, notify: Arc<Notify>, shutdown: Arc<AtomicBool>) {
+    std::thread::Builder::new()
+        .name("bssl-ram-psi".into())
+        .spawn(move || {
+            while !shutdown.load(Ordering::Relaxed) {
+                match trigger.poll_event(Duration::from_secs(5)) {
+                    Ok(true) => notify.notify_one(),
+                    Ok(false) => continue,
+                    Err(e) => {
+                        warn!(err = %e, "PSI poll error — backing off 1s");
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            }
+            debug!("PSI thread exiting (shutdown signalled)");
+        })
+        .expect("spawn PSI poll thread");
 }
 
 /// One pass of the idle-detection + compression pipeline.
@@ -86,7 +188,13 @@ async fn main() -> Result<()> {
 /// logged as a single structured event with `action=<verb>` and
 /// `reason=<why>` fields — grep `action=compress` to see only what the
 /// daemon *actually did*.
-fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u64) {
+fn scan_cycle(
+    config: &Config,
+    tracker: &mut CpuTracker,
+    stats: &Stats,
+    cycle: u64,
+    trigger: ScanTrigger,
+) {
     let started = Instant::now();
     let targets = scan_targets(&config.profiles);
 
@@ -103,6 +211,7 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
     let span = info_span!(
         "cycle",
         n = cycle,
+        trigger = trigger.as_str(),
         targets = targets.len(),
         breakdown = %if summary.is_empty() { "—".into() } else { summary.join(" ") },
     );

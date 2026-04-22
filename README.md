@@ -110,7 +110,7 @@ flowchart LR
     ZRAM -. user clicks tab .-> FAULT
 ```
 
-The daemon is a single Tokio loop. Every `scan_interval_secs` it:
+The daemon is a single Tokio loop driven by **two wake sources**: a safety-net timer (`scan_interval_secs`) and an event-driven PSI memory-pressure trigger. When the system is comfortable, the daemon idles between timer ticks and burns essentially zero CPU. When the kernel reports real memory stall (`/proc/pressure/memory` crosses the configured threshold), `poll(POLLPRI)` fires and the daemon scans immediately — no waiting for the next tick. Every `scan_interval_secs` it:
 
 1. Walks `/proc` and matches each cmdline against the configured **profiles**. Firefox tabs use `-isForBrowser ... tab`;
    everything Chromium-based (Chrome, Brave, Edge, Vivaldi, Opera, *and* every Electron app) carries `--type=renderer`.
@@ -147,11 +147,24 @@ running. The tab, when switched back to, was indistinguishable from a non-compre
 `/etc/bssl-ram/config.toml` — all fields optional, defaults shown:
 
 ```toml
-scan_interval_secs = 10   # seconds between /proc scans
+scan_interval_secs = 10   # seconds between /proc scans (safety-net cap when PSI is on)
 idle_cycles_threshold = 3    # consecutive idle cycles before compressing (3 × 10s = 30s)
 cpu_delta_threshold = 2    # CPU ticks per cycle to be considered idle (2 ticks = 20ms)
+wakeup_delta_threshold = 50  # CPU ticks/cycle that count as a real user wakeup (≥ 500ms CPU)
 min_rss_mib = 50   # don't bother compressing tiny processes
 dry_run = false
+
+# PSI memory pressure trigger -------------------------------------------------
+# When enabled, the daemon also wakes up immediately whenever the kernel
+# reports `psi_stall_threshold_us` of cumulative memory stall inside any
+# rolling `psi_window_us` window. Idle systems → near-zero CPU; pressure
+# spikes → reaction in the same cycle. Requires CAP_SYS_RESOURCE
+# (granted by the systemd unit). On any failure (kernel without
+# CONFIG_PSI, missing cap, …) the daemon logs a warning and silently
+# falls back to timer-only mode.
+psi_enabled            = true
+psi_stall_threshold_us = 150000   # 150 ms of "some-tasks-stalled"
+psi_window_us          = 1000000  # ... within any 1 s window
 
 # Profiles are how the scanner decides what counts as a "compressible
 # target". The defaults below cover Firefox-family + Chromium-family +
