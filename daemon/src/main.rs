@@ -1,3 +1,4 @@
+mod bpf_cpu_tracker;
 mod compressor;
 mod config;
 mod proc_connector;
@@ -51,6 +52,28 @@ async fn main() -> Result<()> {
     }
 
     zram::ensure_zram_swap(&config)?;
+
+    // eBPF cpu_tracker — opt-in v0.3.0-alpha. Loads a BPF program that
+    // hooks raw_tp/sched_switch and accumulates per-PID CPU ns inside
+    // a kernel map. Currently a smoke test: we load + attach, log a
+    // single read so the operator sees it works, but the rest of the
+    // daemon still uses /proc/PID/stat. The full migration (replacing
+    // read_proc_stats with a map lookup) lands in v0.3.0 once we have
+    // a few weeks of real-world load on the BPF path.
+    let bpf_tracker = if config.enable_bpf_cpu_tracker {
+        match bpf_cpu_tracker::BpfCpuTracker::load() {
+            Ok(t) => {
+                info!("eBPF cpu_tracker active (smoke test mode — /proc/PID/stat still authoritative)");
+                Some(t)
+            }
+            Err(e) => {
+                warn!(err = %e, "eBPF cpu_tracker load failed — staying on /proc/PID/stat");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // cn_proc — process events via netlink. Maintains an in-memory
     // table of matched targets so scan_cycle never has to walk /proc
@@ -138,6 +161,13 @@ async fn main() -> Result<()> {
                 let targets = collect_targets(&process_table, &config);
                 scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets);
 
+                // Smoke test: peek at the BPF map for our own PID so the
+                // operator sees in the journal that the kernel is updating
+                // the counter every context switch.
+                if let Some(t) = &bpf_tracker {
+                    log_bpf_self_runtime(t);
+                }
+
                 if config.telemetry_interval_cycles > 0
                     && cycle.is_multiple_of(config.telemetry_interval_cycles)
                 {
@@ -178,6 +208,7 @@ async fn main() -> Result<()> {
     info!(
         psi_active,
         cn_proc_active = process_table.is_some(),
+        bpf_active = bpf_tracker.is_some(),
         "daemon stopping"
     );
     Ok(())
@@ -190,6 +221,15 @@ fn collect_targets(table: &Option<ProcessTable>, config: &Config) -> Vec<TargetP
     match table {
         Some(t) => t.live_targets(),
         None => scan_targets(&config.profiles),
+    }
+}
+
+/// Smoke-test the BPF map by logging the runtime of our own PID — proves
+/// the program is actually accumulating data instead of just sitting
+/// loaded. Cheap (one map lookup), called once per cycle.
+fn log_bpf_self_runtime(tracker: &bpf_cpu_tracker::BpfCpuTracker) {
+    if let Some(ns) = tracker.runtime_ns(std::process::id()) {
+        debug!(self_runtime_ns = ns, "bpf cpu_tracker reports self runtime");
     }
 }
 

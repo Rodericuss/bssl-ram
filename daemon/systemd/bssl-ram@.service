@@ -43,8 +43,12 @@ Group=%i
 # kernels relaxed this to allow unprivileged use, but granting the cap
 # keeps the feature working everywhere. Without it the daemon falls
 # back to walking /proc per scan cycle (see proc_connector.rs).
-AmbientCapabilities=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN
+# CAP_BPF + CAP_PERFMON are needed to load the cpu_tracker eBPF program
+# at startup (kernel ≥ 5.8). Off by default in v0.3.0-alpha (config:
+# enable_bpf_cpu_tracker = false); the load failure when caps are absent
+# is logged once and the daemon falls back to /proc/PID/stat polling.
+AmbientCapabilities=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 
 # Sandboxing ------------------------------------------------------------------
 # Kept minimal. Aggressive options like ProtectKernelTunables, PrivateUsers,

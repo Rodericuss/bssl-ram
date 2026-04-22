@@ -2,6 +2,7 @@
 name = "bssl-ram"
 version = "0.2.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -11,6 +12,18 @@ libc = "0.2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# eBPF runtime — loads the compiled cpu_tracker BPF skeleton at startup
+# and reads its task-runtime map per scan cycle. Optional at runtime via
+# `enable_bpf_cpu_tracker` config; the daemon falls back to /proc/PID/stat
+# polling when the load fails (kernel too old, missing CAP_BPF, ...).
+libbpf-rs = "0.24"
+
+[build-dependencies]
+# Compiles the BPF program (src/bpf/cpu_tracker.bpf.c) with clang and
+# generates a Rust skeleton in OUT_DIR. Needs `clang` + `bpftool` on
+# the build machine; build.rs auto-generates vmlinux.h from
+# /sys/kernel/btf/vmlinux so no third-party headers are checked in.
+libbpf-cargo = "0.24"
 
 [profile.release]
 opt-level = 3

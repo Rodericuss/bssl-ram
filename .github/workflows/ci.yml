@@ -21,6 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: install BPF build deps
+        run: |
+          sudo apt-get update
+          # clang compiles the BPF program; libbpf-dev links the userspace
+          # loader; linux-tools-* gives bpftool which build.rs uses to dump
+          # /sys/kernel/btf/vmlinux into a vmlinux.h header.
+          sudo apt-get install -y clang libbpf-dev linux-tools-common linux-tools-generic
+          # The bpftool package on Ubuntu ships under a kernel-versioned
+          # path; symlink the right one into PATH so build.rs finds it.
+          sudo ln -sf "$(find /usr/lib/linux-tools/* -name bpftool 2>/dev/null | head -n1)" /usr/local/bin/bpftool
+          bpftool version
+
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,6 +63,12 @@ jobs:
       contents: write   # required by softprops/action-gh-release on tags
     steps:
       - uses: actions/checkout@v4
+
+      - name: install BPF build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libbpf-dev linux-tools-common linux-tools-generic
+          sudo ln -sf "$(find /usr/lib/linux-tools/* -name bpftool 2>/dev/null | head -n1)" /usr/local/bin/bpftool
 
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -69,6 +69,17 @@ pub struct Config {
     #[serde(default = "default_psi_window_us")]
     pub psi_window_us: u64,
 
+    /// Load the eBPF cpu_tracker program at startup and read per-task
+    /// CPU runtime from a kernel hash map instead of opening
+    /// `/proc/PID/stat` every cycle. Requires CAP_BPF + CAP_PERFMON
+    /// (both granted by the systemd unit) and a kernel with raw_tp
+    /// support (≥ 5.8). Falls back to /proc/PID/stat polling if the
+    /// load fails for any reason.
+    ///
+    /// Off by default in v0.3.0-alpha — flip to true to opt in.
+    #[serde(default = "default_bpf_enabled")]
+    pub enable_bpf_cpu_tracker: bool,
+
     /// Drift correction interval for the cn_proc-driven process table.
     /// Every N scan cycles, the table is reconciled against a fresh
     /// /proc walk so any events the kernel dropped (under fork storm,
@@ -107,6 +118,7 @@ impl Default for Config {
             psi_stall_threshold_us: default_psi_stall_us(),
             psi_window_us: default_psi_window_us(),
             cn_proc_reseed_every_n_cycles: default_cn_proc_reseed(),
+            enable_bpf_cpu_tracker: default_bpf_enabled(),
             profiles: default_profiles(),
         }
     }
@@ -130,6 +142,10 @@ fn default_psi_window_us() -> u64 {
 
 fn default_cn_proc_reseed() -> u64 {
     10
+}
+
+fn default_bpf_enabled() -> bool {
+    false
 }
 
 impl Config {
