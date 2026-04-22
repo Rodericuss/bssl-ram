@@ -1,0 +1,3 @@
+daemon/target/
+*.log
+/etc/foxram/
