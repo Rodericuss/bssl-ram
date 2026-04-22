@@ -1,0 +1,135 @@
+name: Bug report
+description: Something in bssl-ram behaves incorrectly.
+title: "bug: <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! A couple of ground rules first:
+
+        - **Do not** use this form for security issues. See
+          [SECURITY.md](../../blob/main/SECURITY.md).
+        - **Do not** use this form to ask for a new app profile. Use the
+          *Profile request* template.
+        - Please search existing issues first.
+
+        Fill in as much as you can. Redact usernames / paths you don't want
+        public, but keep enough for us to reproduce.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I'm on a supported version (latest `0.3.x`) or I can upgrade.
+          required: true
+        - label: This is not a security report.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: bssl-ram version
+      description: Output of `bssl-ram --version` or the commit SHA you built from.
+      placeholder: "0.3.0 / commit abcd1234"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel + distribution
+      description: "`uname -a` and the distro name."
+      placeholder: "Linux 6.8.9-arch1-1, Arch Linux"
+    validations:
+      required: true
+
+  - type: input
+    id: zram
+    attributes:
+      label: zram configuration
+      description: |
+        Relevant sysfs / systemd-zram-generator config. `cat /proc/swaps`
+        and the `compression-algorithm` line are enough.
+      placeholder: "/dev/zram0, zstd, 16 GiB"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected-subsystem
+    attributes:
+      label: Affected subsystem
+      options:
+        - scanner (/proc walk, cn_proc)
+        - cpu_tracker (eBPF or /proc/PID/stat fallback)
+        - compressor (smaps + process_madvise)
+        - PSI pressure trigger
+        - zram helpers
+        - systemd unit / capabilities
+        - config loader
+        - examples / bench
+        - unclear / other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include symptoms, not conclusions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Minimal reproduction. Prefer commands and config snippets over
+        screenshots.
+      value: |
+        1. Start `bssl-ram` with the config below.
+        2. Open <app> and leave it idle for N seconds.
+        3. Observe ...
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: The contents of `/etc/bssl-ram/config.toml` (redact freely).
+      render: toml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `journalctl -u bssl-ram@$USER -e` or the stdout you saw.
+        Please run with `RUST_LOG=bssl_ram=debug` if you can.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Hypothesis, bisected commit, related issues, etc.
+    validations:
+      required: false
