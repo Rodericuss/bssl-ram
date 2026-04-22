@@ -1,0 +1,104 @@
+name: Performance regression
+description: A previously-fast path got slower, or memory savings dropped.
+title: "perf: <short summary>"
+labels: ["performance", "regression", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Performance reports **require numbers**. If you can't produce at
+        least a rough before/after, please open a plain bug report instead
+        and say "feels slower" there — we'll ask for the same data before
+        acting anyway, and this template will otherwise block you.
+
+        The `bench/` harness exists exactly for this. See
+        [`bench/README.md`](../../blob/main/bench/README.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I have before/after measurements (RSS, CPU, latency, syscall time, etc.).
+          required: true
+        - label: I am on a supported version.
+          required: true
+        - label: I searched existing issues and discussions.
+          required: true
+
+  - type: input
+    id: good-version
+    attributes:
+      label: Last known good version or commit
+      placeholder: "0.2.4 / commit abcd1234"
+    validations:
+      required: true
+
+  - type: input
+    id: bad-version
+    attributes:
+      label: First bad version or commit
+      placeholder: "0.3.0 / commit efgh5678"
+    validations:
+      required: true
+
+  - type: textarea
+    id: host
+    attributes:
+      label: Host details
+      description: |
+        `uname -a`, CPU model, total RAM, distro. Anything that could
+        explain the delta (kernel change, zram algorithm change, MGLRU
+        toggle, …).
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Measured delta
+      description: |
+        Paste a table or a clear before/after. Prefer the same workload
+        on both versions (same tabs, same load order).
+      value: |
+        | Metric          | Before | After | Δ          |
+        |:----------------|-------:|------:|-----------:|
+        | RSS saved / tab |        |       |            |
+        | Daemon idle CPU |        |       |            |
+        | Scan cycle time |        |       |            |
+        | Syscall time    |        |       |            |
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: |
+        What exactly were you doing? Which app, how many tabs, which sites
+        / Electron apps? Was the system under PSI pressure?
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Config diff
+      description: |
+        If you changed `/etc/bssl-ram/config.toml` alongside the upgrade,
+        paste the diff. "unchanged" is a valid answer.
+      render: diff
+    validations:
+      required: false
+
+  - type: textarea
+    id: bisect
+    attributes:
+      label: Bisect (optional)
+      description: |
+        If you've narrowed it down further (a specific PR, a kernel bump,
+        a zram algorithm change), put it here.
+    validations:
+      required: false
