@@ -15,9 +15,6 @@ jobs:
   check:
     name: cargo check + test + fmt + clippy
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: daemon
     steps:
       - uses: actions/checkout@v4
 
@@ -40,20 +37,18 @@ jobs:
 
       - name: cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: daemon
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
 
       - name: cargo build (release)
-        run: cargo build --release
+        run: cargo build --workspace --release
 
   package:
     name: package release tarball
@@ -75,12 +70,9 @@ jobs:
 
       - name: cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: daemon
 
-      - name: build release binary
-        working-directory: daemon
-        run: cargo build --release
+      - name: build release binaries
+        run: cargo build --workspace --release
 
       - name: assemble tarball
         run: |
@@ -92,11 +84,17 @@ jobs:
           fi
           STAGE="bssl-ram-${VERSION}-x86_64-linux"
           mkdir -p "$STAGE"
-          cp daemon/target/release/bssl-ram   "$STAGE/"
-          cp daemon/systemd/bssl-ram@.service "$STAGE/"
-          cp daemon/systemd/README.md         "$STAGE/SYSTEMD.md"
-          cp README.md                        "$STAGE/"
-          chmod +x "$STAGE/bssl-ram"
+          # Workspace layout — both binaries land at target/release/
+          cp target/release/bssl-ram              "$STAGE/"
+          cp target/release/bssl-ram-bridge       "$STAGE/"
+          cp daemon/systemd/bssl-ram@.service     "$STAGE/"
+          cp daemon/systemd/README.md             "$STAGE/SYSTEMD.md"
+          cp extension/README.md                  "$STAGE/EXTENSION.md"
+          cp README.md                            "$STAGE/"
+          cp INSTALL.md                           "$STAGE/" || true
+          cp CHANGELOG.md                         "$STAGE/" || true
+          cp LICENSE                              "$STAGE/" || true
+          chmod +x "$STAGE/bssl-ram" "$STAGE/bssl-ram-bridge"
           tar czf "${STAGE}.tar.gz" "$STAGE"
           sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
           {
