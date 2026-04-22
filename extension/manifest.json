@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "bssl-ram signals",
+  "version": "0.2.0",
+  "description": "Collects conservative browser-side signals and reports them to the local bssl-ram daemon.",
+  "minimum_chrome_version": "121",
+  "permissions": [
+    "tabs",
+    "windows",
+    "idle",
+    "alarms",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "http://[::1]/*"
+  ],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
+  },
+  "web_accessible_resources": [],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bssl-ram-signals@bssl.io",
+      "strict_min_version": "121.0"
+    }
+  }
+}
