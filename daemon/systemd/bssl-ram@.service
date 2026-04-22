@@ -60,13 +60,27 @@ ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 PrivateDevices=true
-PrivateNetwork=true
+# PrivateNetwork=true intentionally removed in v0.3.1: the optional
+# browser-signals feature (`signal_server_enabled`) binds a Unix socket
+# under RuntimeDirectory below, which PrivateNetwork itself does NOT
+# block — but a previous iteration used loopback TCP, which PrivateNetwork
+# silently broke. We keep network access off via RestrictAddressFamilies
+# instead so we can serve AF_UNIX while denying AF_INET/AF_INET6 egress.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 ProtectClock=true
 ProtectControlGroups=true
 ProtectHostname=true
 ProtectKernelLogs=true
 ProtectKernelModules=true
 LockPersonality=true
+
+# Runtime directory for the optional signals UDS socket.
+# Creates /run/bssl-ram/ mode 0700 owned by User=/Group=. The daemon
+# places its browser-signals socket at /run/bssl-ram/signals.sock when
+# `signal_server_enabled = true` and `signal_transport = "uds"`.
+# RuntimeDirectory vanishes on Stop, so no stale socket file on restart.
+RuntimeDirectory=bssl-ram
+RuntimeDirectoryMode=0700
 
 # Resource limits -------------------------------------------------------------
 MemoryHigh=64M
