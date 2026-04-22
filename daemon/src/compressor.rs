@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use libc::{c_int, c_long, iovec};
 use std::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 // process_madvise syscall number on x86_64 Linux (kernel >= 5.10)
 const SYS_PROCESS_MADVISE: c_long = 440;
@@ -142,29 +142,37 @@ pub fn read_cpu_ticks(pid: u32) -> Option<(u64, u64)> {
     let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
     parse_cpu_ticks(&stat)
 }
+/// Outcome of a single compress_pid call. Returned so the caller can
+/// fold the numbers into telemetry without reparsing log strings.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompressOutcome {
+    pub regions: usize,
+    pub bytes_advised: u64,
+    pub bytes_skipped_by_kernel: u64,
+    pub batches: usize,
+}
+
 /// Calls process_madvise(MADV_PAGEOUT) on all anonymous regions of a process.
 /// This instructs the kernel to move those pages to swap (zram) immediately.
 ///
 /// The process is never paused, signalled, or modified in any way.
 /// When it next accesses a paged-out address, the kernel transparently
 /// decompresses and restores the page — the process never notices.
-pub fn compress_pid(pid: u32, dry_run: bool) -> Result<()> {
-    let rss = rss_mib(pid);
-    info!("compressing pid {} (RSS: {} MiB)", pid, rss);
-
+pub fn compress_pid(pid: u32, dry_run: bool) -> Result<CompressOutcome> {
+    // Per-PID summary is emitted by the caller (one canonical line with
+    // action+reason fields), so the compressor only logs at debug now.
     let regions =
         read_anonymous_regions(pid).with_context(|| format!("reading regions for pid {}", pid))?;
 
     debug!("pid {} has {} anonymous regions", pid, regions.len());
 
     if dry_run {
-        info!(
-            "[dry-run] would page out {} regions for pid {} ({} MiB)",
-            regions.len(),
-            pid,
-            rss
-        );
-        return Ok(());
+        return Ok(CompressOutcome {
+            regions: regions.len(),
+            bytes_advised: 0,
+            bytes_skipped_by_kernel: 0,
+            batches: 0,
+        });
     }
 
     let pidfd = open_pidfd(pid)?;
@@ -219,14 +227,12 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<()> {
     unsafe { libc::close(pidfd) };
 
     let skipped = total_requested.saturating_sub(bytes_advised);
-    info!(
-        "pid {} paged out {} MiB to zram in {} batch(es) ({} MiB skipped by kernel)",
-        pid,
-        bytes_advised / 1024 / 1024,
-        chunks_done,
-        skipped / 1024 / 1024,
-    );
-    Ok(())
+    Ok(CompressOutcome {
+        regions: regions.len(),
+        bytes_advised: bytes_advised as u64,
+        bytes_skipped_by_kernel: skipped as u64,
+        batches: chunks_done,
+    })
 }
 
 #[cfg(test)]

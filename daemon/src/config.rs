@@ -25,6 +25,11 @@ pub struct Config {
     /// Log what would happen without actually compressing anything.
     pub dry_run: bool,
 
+    /// Emit a cumulative-stats snapshot every N scan cycles. Default 60
+    /// (≈10 min at the default 10s interval). Set to 0 to disable.
+    #[serde(default = "default_telemetry_interval")]
+    pub telemetry_interval_cycles: u64,
+
     /// Browser/app profiles used by the scanner. Each profile is a
     /// declarative cmdline-match rule. Defaults to a built-in set covering
     /// Firefox-family + Chromium-family + Electron apps. Users can replace
@@ -48,9 +53,14 @@ impl Default for Config {
             cpu_delta_threshold: 2,
             min_rss_mib: 50,
             dry_run: false,
+            telemetry_interval_cycles: default_telemetry_interval(),
             profiles: default_profiles(),
         }
     }
+}
+
+fn default_telemetry_interval() -> u64 {
+    60
 }
 
 impl Config {

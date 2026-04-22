@@ -53,8 +53,57 @@ capsh --decode=$(awk '/^CapEff:/ {print $2}' /proc/$PID/status)
 After ~30s of any tab being idle you should see compression in the journal:
 
 ```
-INFO compressing pid 222139 (RSS: 85 MiB)
-INFO pid 222139 paged out 50 MiB to zram in 1 batch(es) (0 MiB skipped by kernel)
+INFO cycle{n=3 targets=12 breakdown=chromium=8 firefox=4}: page-out done
+     pid=222139 profile=firefox action=compress reason=idle
+     rss_mib=85 regions=63 bytes_advised_mib=50 batches=1 dry_run=false
+```
+
+Each per-PID decision is one structured line with `action=` and `reason=`
+fields — grep `action=compress` to see only what the daemon **did**, or
+`action=skip` to see what it deliberately ignored.
+
+## Logging & telemetry
+
+Two env vars control output (set via `Environment=` in a drop-in or pass
+inline when running directly):
+
+| Variable | Default | Meaning |
+|:---|:---|:---|
+| `RUST_LOG` | `info` | Standard tracing EnvFilter. e.g. `bssl_ram=debug` to see per-skip decisions, `bssl_ram::scanner=trace` for low-level. |
+| `BSSL_LOG_FORMAT` | `pretty` | `pretty` (human, ANSI), `compact` (one-liner), or `json` (one JSON object per event — pipe to `jq` or send to Loki/Elasticsearch). |
+
+Useful one-liners:
+
+```bash
+# Watch only what got compressed
+journalctl -u bssl-ram@$USER -f | grep 'action=compress'
+
+# Watch only the per-cycle scoreboard (default every 60 cycles ≈ 10 min)
+journalctl -u bssl-ram@$USER -f | grep 'stats snapshot'
+
+# Per-PID timeline (great when "did pid 12345 ever get compressed?")
+journalctl -u bssl-ram@$USER --since "1 hour ago" | grep 'pid=12345'
+
+# JSON ingest into jq for ad-hoc analysis
+BSSL_LOG_FORMAT=json /usr/local/bin/bssl-ram \
+  | jq -c 'select(.fields.action == "compress")
+           | {pid: .fields.pid, profile: .fields.profile,
+              mib: .fields.bytes_advised_mib}'
+```
+
+Tune the snapshot cadence in `/etc/bssl-ram/config.toml`:
+
+```toml
+telemetry_interval_cycles = 60   # snapshot every N cycles, 0 disables
+```
+
+A snapshot looks like:
+
+```
+INFO bssl-ram stats snapshot
+     scans=120 targets_seen=1860 compressions=42 bytes_paged_out_mib=3870
+     bytes_skipped_mib=12 skip_warmup=8 skip_active=180 skip_already_compressed=1620
+     skip_low_rss=10 errors=0
 ```
 
 ## Sandbox notes
