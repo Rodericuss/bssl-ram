@@ -1,6 +1,6 @@
 [Unit]
 Description=bssl-ram — compress idle Firefox tab memory
-Documentation=https://github.com/gabrielmaialva33/bssl-ram
+Documentation=https://github.com/Rodericuss/bssl-ram
 After=graphical.target
 Wants=graphical.target
 
