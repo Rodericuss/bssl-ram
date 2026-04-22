@@ -33,17 +33,20 @@ pub fn scan_firefox_tabs() -> Vec<FirefoxTabProcess> {
         };
 
         let cmdline_path = format!("/proc/{}/cmdline", pid);
-        let cmdline = match fs::read(&cmdline_path) {
+        let cmdline_raw = match fs::read(&cmdline_path) {
             Ok(b) => b,
             Err(_) => continue, // process may have exited
         };
 
-        // cmdline is null-separated — split on \0
-        let args: Vec<&str> = cmdline
-            .split(|&b| b == 0)
-            .filter_map(|s| std::str::from_utf8(s).ok())
-            .filter(|s| !s.is_empty())
+        // Firefox tab processes rewrite their argv as a single space-separated
+        // string (so it shows nicely in `ps`), while infrastructure procs keep
+        // the kernel default of NUL separation. Treat NUL as whitespace so both
+        // forms tokenize identically.
+        let cmdline_str: String = cmdline_raw
+            .iter()
+            .map(|&b| if b == 0 { ' ' } else { b as char })
             .collect();
+        let args: Vec<&str> = cmdline_str.split_whitespace().collect();
 
         // Must be a Firefox process
         if !args.first().map_or(false, |a| a.contains("firefox")) {
