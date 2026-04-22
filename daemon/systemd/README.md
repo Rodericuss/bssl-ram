@@ -19,7 +19,7 @@ running in the init userns. A system service can drop privileges with
 The unit is a template (`bssl-ram@.service`), instantiated per user:
 
 ```
-sudo systemctl start bssl-ram@gabrielmaia.service
+sudo systemctl start bssl-ram@username.service
 ```
 
 ## Install
