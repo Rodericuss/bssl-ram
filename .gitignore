@@ -11,6 +11,10 @@ daemon/target/
 daemon/src/bpf/vmlinux.h
 
 # Per-host benchmark output. Re-run scripts under bench/scripts/ to
-# regenerate; the .gitkeep marker preserves the directory.
+# regenerate; the .gitkeep marker preserves the directory. Plots ARE
+# checked in so the README's <picture> tags resolve on GitHub without
+# anyone needing to clone + run analyze.R first.
 bench/results/*
 !bench/results/.gitkeep
+!bench/results/plots/
+!bench/results/plots/*.png

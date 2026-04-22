@@ -128,75 +128,172 @@ app doesn't know its pages moved.
 
 ## 📊 Benchmarks (v0.3.0)
 
-Numbers below come from the reproducible suite in [`bench/`](./bench/) — run
-the scripts yourself and compare. Methodology + caveats in
-[`bench/README.md`](./bench/README.md). Kernel: Linux 6.19.12-zen1-1-zen. The
-workload is the author's own idle Firefox + Chromium + Electron session
-(typical: ~20 renderer-ish targets).
+> [!IMPORTANT]
+> Every number below comes from the reproducible suite under [`bench/`](./bench/).
+> Re-run any script and your machine produces a comparable report — methodology
+> in [`bench/README.md`](./bench/README.md), aggregation + plots via
+> `Rscript bench/analyze.R`. **Workload**: author's own idle Firefox + Chromium +
+> Electron session (~20 renderer-ish targets). **Kernel**: Linux 6.19.12-zen1-1-zen.
 
-### A — Daemon CPU per discovery mode (dry-run, 300s windows)
+### A — Daemon CPU per discovery mode
 
-Each config runs 150 scan cycles (`scan_interval_secs=2`, `dry_run=true`).
-CPU sampled from `/proc/<daemon-pid>/stat` at 2 s and 302 s.
+300 s sample window per config, `dry_run=true` so successive runs don't perturb
+each other through residual zram churn.
 
-| Config                         |  CPU in 300 s |  avg CPU % | vs /proc baseline |
-|:-------------------------------|--------------:|-----------:|------------------:|
-| `/proc` walk + `/proc/PID/stat`|       280 ms  | **0.093 %**|              —    |
-| cn_proc + `/proc/PID/stat`     |       250 ms  |   0.083 %  |         **−11 %** |
-| cn_proc + **eBPF** (v0.3.0)    |       240 ms  |   0.080 %  |         **−14 %** |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/test-a-cpu-dark.png">
+  <img alt="Daemon CPU per discovery mode — three bars showing 0.093 percent for /proc walk, 0.083 percent for cn_proc, 0.080 percent for cn_proc plus eBPF" src="bench/results/plots/test-a-cpu-light.png" width="100%">
+</picture>
 
-Take-away: every layer ran with a large, busy workload on the machine and the
-daemon still sat below **0.1 % CPU** in steady state. The absolute numbers are
-low because the per-cycle work is already microseconds — the interesting signal
-is that each TIER-S feature shaves another bite off of an already tiny budget.
+```mermaid
+xychart-beta
+    title "Daemon CPU % over a 300 s window  (lower is better)"
+    x-axis ["procwalk", "cn_proc", "cn_proc + BPF"]
+    y-axis "Average CPU %" 0.07 --> 0.10
+    bar [0.093, 0.083, 0.080]
+```
 
-### B — Reaction latency under induced memory pressure (14 GiB alloc)
+| Config                         | CPU in 300 s | Average CPU % | vs `/proc` walk |
+|:-------------------------------|-------------:|--------------:|----------------:|
+| `/proc` walk + `/proc/PID/stat`|       280 ms |   **0.093 %** |              —  |
+| cn_proc + `/proc/PID/stat`     |       250 ms |     0.083 %   |        **−11 %**|
+| cn_proc + **eBPF** (v0.3.0)    |       240 ms |     0.080 %   |        **−14 %**|
 
-A child process allocates 14 GiB and touches every page. We time from the
-allocation starting to the first `page-out done` line in the daemon's log.
+The headline is the absolute floor — even with a busy desktop session the
+daemon stays below **0.1 % CPU**. The deltas matter because every TIER-S
+feature shaves a bit more off an already tiny budget; on a 24-core box that
+~10 % delta is essentially free, but on a Pi-class device it adds up.
 
-| Mode                                   |  Time to first compress |
-|:---------------------------------------|------------------------:|
-| `psi_enabled = true`  (event-driven)   |           **~3.4 s** *  |
-| `psi_enabled = false` (timer, 10 s)    |               ~17.0 s   |
+### B — Reaction latency under 14 GiB memory pressure
 
-*\*The 3.4 s is dominated by the Python allocation phase itself — the gap between
-the kernel crossing the PSI threshold and the daemon's first `cycle: scan
-complete trigger="psi-pressure"` log line is sub-millisecond (see `bench/results/psi-latency-*.log`).*
+A child Python process allocates 14 GiB and writes one byte per page,
+forcing the kernel into reclaim territory. We time from the allocation
+starting to the first `page-out done` line in the daemon's log.
 
-### C — Real compression of the largest renderer (one-shot)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/test-b-psi-latency-dark.png">
+  <img alt="Reaction latency under memory pressure — PSI on at 3402 ms vs timer-only at 17041 ms" src="bench/results/plots/test-b-psi-latency-light.png" width="100%">
+</picture>
 
-Picked the biggest `--type=renderer` PID currently alive and ran
-`bench/scripts/bench-real-compress.sh`.
+```mermaid
+xychart-beta
+    title "Wall-clock from alloc start to first compress  (lower is better)"
+    x-axis ["PSI on", "Timer-only (10 s)"]
+    y-axis "milliseconds" 0 --> 18000
+    bar [3402, 17041]
+```
 
-| Metric           |  Before |   After |                     Δ |
-|:-----------------|--------:|--------:|----------------------:|
-| **RSS**          | 300 MiB | 191 MiB |    **−109 MiB (−36 %)**|
-| **PSS**          | 162 MiB |  50 MiB |              −112 MiB |
-| **Swap (zram)**  |  13 MiB | 122 MiB |         **+109 MiB**  |
-| **Anonymous**    | 128 MiB |  19 MiB |              −109 MiB |
-| **Syscall time** |       — |       — | **398 ms for 669 regions (1 batch)** |
+| Mode                                  | Time to first compress |  vs PSI |
+|:--------------------------------------|-----------------------:|--------:|
+| `psi_enabled = true`  (event-driven)  |           **3 402 ms** |       — |
+| `psi_enabled = false` (timer, 10 s)   |             17 041 ms  |  **5×** |
 
-Chrome never noticed. The tab kept scrolling, and the only user-visible
-effect on the next switch-to was a faint page-fault ramp.
+> [!NOTE]
+> The 3.4 s figure is *dominated by the Python allocation ramp itself*
+> (~3 s to fault in 14 GiB and accumulate 50 ms of stall). The kernel→daemon
+> wakeup once `some_avg10` crosses the threshold is sub-millisecond — see
+> `bench/results/psi-latency-*.log` for the raw timestamps.
 
-### E — Recompression cascade prevention (aggressive 90 s)
+### C — Real compression on the largest renderer
 
-`idle_cycles_threshold = 1`, `scan_interval_secs = 5`, so every target becomes
-eligible for compression every 5 s. Without the dual-threshold guard (v0.1.x
-behaviour) browsers' GC pulses flipped the anti-recompression flag and PIDs
-got paged out multiple times inside the window.
+`bench/scripts/bench-real-compress.sh` picks the biggest live target,
+issues exactly one `process_madvise(MADV_PAGEOUT)` sweep across all of
+its private-anonymous regions, and captures `/proc/PID/smaps_rollup`
+on either side.
 
-| Metric                  |        v0.3.0 | v0.1.x (same workload, re-run before the fix) |
-|:------------------------|--------------:|----------------------------------------------:|
-| Total compress events   |        **14** |                                             9 |
-| Unique PIDs compressed  |        **14** |                                             6 |
-| Recompressions          |         **0** |                                             3 |
-| Recompression rate      |      **0 %**  |                                        33.3 % |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/test-c-rss-before-after-dark.png">
+  <img alt="RSS before vs after compression — drops from 300 MiB to 191 MiB" src="bench/results/plots/test-c-rss-before-after-light.png" width="80%">
+</picture>
 
-v0.3.0 compressed **every eligible target exactly once** across the 90 s
-window; the pre-fix number is from the live repro we did before landing the
-dual threshold (`c0acaf3`).
+| Metric           |  Before |   After |                                Δ |
+|:-----------------|--------:|--------:|---------------------------------:|
+| **RSS**          | 300 MiB | 191 MiB |          **−109 MiB (−36 %)**    |
+| **PSS**          | 162 MiB |  50 MiB |                       −112 MiB   |
+| **Swap (zram)**  |  13 MiB | 122 MiB |              **+109 MiB**        |
+| **Anonymous**    | 128 MiB |  19 MiB |                       −109 MiB   |
+| **Syscall time** |       — |       — | **398 ms** — 669 regions, 1 batch|
+
+Chrome never noticed. The tab kept rendering; the only user-visible
+effect on the next switch-to was a faint page-fault ramp as zram
+streamed the working set back in.
+
+### E — Recompression cascade prevention
+
+90 s aggressive window: `idle_cycles_threshold = 1`,
+`scan_interval_secs = 5`, so every target becomes eligible for compression
+every 5 s. Pre-fix browsers' GC pulses flipped the anti-recompression flag
+and the daemon paged the same PIDs out multiple times inside the window —
+the bug Rodrigo flagged in `c0acaf3`.
+
+<table>
+<tr>
+<td>
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'pie1':'#3a8d3a','pie2':'#e15759'}}}%%
+pie showData
+    title "v0.3.0 — same 90 s window"
+    "Unique compressions" : 14
+    "Recompressions (waste)" : 0
+```
+
+</td>
+<td>
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'pie1':'#3a8d3a','pie2':'#e15759'}}}%%
+pie showData
+    title "v0.1.x — pre-dual-threshold"
+    "Unique compressions" : 6
+    "Recompressions (waste)" : 3
+```
+
+</td>
+</tr>
+</table>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/plots/test-e-recompression-dark.png">
+  <img alt="Recompression cascade prevention — 14 unique compressions, 0 recompressions" src="bench/results/plots/test-e-recompression-light.png" width="80%">
+</picture>
+
+| Metric                 |       v0.3.0 | v0.1.x (re-run pre-fix) |
+|:-----------------------|-------------:|------------------------:|
+| Total compress events  |       **14** |                       9 |
+| Unique PIDs compressed |       **14** |                       6 |
+| Recompressions         |        **0** |                       3 |
+| Recompression rate     |     **0.0 %**|                  33.3 % |
+
+v0.3.0 compressed every eligible target exactly once. The pre-fix number
+is from the live repro we did before landing the dual threshold.
+
+<details>
+<summary>📂 Where the raw data lives</summary>
+
+Each script under `bench/scripts/` writes a timestamped `*.txt` summary
++ a `*.log` with the full daemon output to `bench/results/`. Re-running
+any script appends a new run; `Rscript bench/analyze.R` aggregates
+across all of them and re-renders the plots.
+
+```
+bench/
+├── analyze.R                       # parser + ggplot renderer
+├── configs/                        # one TOML per test variant
+├── scripts/                        # one runner per test
+└── results/
+    ├── cpu-<timestamp>.txt          (Test A)
+    ├── psi-latency-<timestamp>.txt  (Test B)
+    ├── compress-real-<timestamp>.txt (Test C)
+    ├── recompress-<timestamp>.txt   (Test E)
+    └── plots/
+        ├── test-a-cpu-{light,dark}.png
+        ├── test-b-psi-latency-{light,dark}.png
+        ├── test-c-rss-before-after-{light,dark}.png
+        └── test-e-recompression-{light,dark}.png
+```
+
+</details>
 
 ### Historical reference — a bigger tab
 

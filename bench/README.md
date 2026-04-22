@@ -9,6 +9,7 @@ re-run the suite on their own machine and get comparable results.
 ```
 bench/
 ├── README.md          (this file — methodology, how to run, caveats)
+├── analyze.R          (parses results/*.txt across runs → markdown + ggplot PNGs)
 ├── configs/           (per-test daemon TOMLs, drop-in for /etc/bssl-ram/config.toml)
 │   ├── A1-procwalk.toml          discovery via /proc walk, BPF off
 │   ├── A2-cnproc.toml            cn_proc table on, BPF off
@@ -21,9 +22,30 @@ bench/
 │   ├── bench-psi-latency.sh      Test B — reaction time under induced memory pressure
 │   ├── bench-real-compress.sh    Test C — RSS / zram delta on the largest renderer
 │   └── bench-recompression.sh    Test E — count compress events vs unique PIDs
-└── results/           (output goes here — JSON + plain text per run; gitignored)
-    └── .gitkeep
+└── results/           (output goes here — text summaries gitignored, plots checked in)
+    ├── .gitkeep
+    └── plots/                   committed PNGs (light + dark theme variants)
+        ├── test-a-cpu-{light,dark}.png
+        ├── test-b-psi-latency-{light,dark}.png
+        ├── test-c-rss-before-after-{light,dark}.png
+        └── test-e-recompression-{light,dark}.png
 ```
+
+## Aggregating + plotting
+
+After running any of the scripts, regenerate the markdown report + PNGs with:
+
+```bash
+sudo Rscript -e 'install.packages(c("ggplot2","scales"))'   # one-time, ~2 min
+Rscript bench/analyze.R                                     # rebuilds tables + plots
+Rscript bench/analyze.R --no-plots                          # markdown only
+```
+
+The script aggregates **across every timestamped run currently in
+`results/`**, so consecutive invocations build sample sizes that show up
+as means + std-dev in the output table. The PNGs use a brand-aligned
+theme (Firefox-orange + dark/light backgrounds) so they drop straight
+into the project README via a `<picture>` element.
 
 ## Methodology
 
