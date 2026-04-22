@@ -16,6 +16,7 @@ pub struct Stats {
     pub skips_active: AtomicU64,
     pub skips_already_compressed: AtomicU64,
     pub skips_low_rss: AtomicU64,
+    pub skips_browser_signals: AtomicU64,
     pub errors: AtomicU64,
     /// Cycles triggered by a PSI memory pressure event rather than the
     /// safety-net timer. High value vs `scans` means the system has
@@ -45,6 +46,7 @@ impl Stats {
         let skip_active = self.skips_active.load(Ordering::Relaxed);
         let skip_already = self.skips_already_compressed.load(Ordering::Relaxed);
         let skip_low_rss = self.skips_low_rss.load(Ordering::Relaxed);
+        let skip_browser_signals = self.skips_browser_signals.load(Ordering::Relaxed);
         let errors = self.errors.load(Ordering::Relaxed);
         let psi_events = self.psi_events.load(Ordering::Relaxed);
 
@@ -58,6 +60,7 @@ impl Stats {
             skip_active,
             skip_already_compressed = skip_already,
             skip_low_rss,
+            skip_browser_signals,
             errors,
             psi_events,
             "bssl-ram stats snapshot"

@@ -89,6 +89,31 @@ pub struct Config {
     #[serde(default = "default_cn_proc_reseed")]
     pub cn_proc_reseed_every_n_cycles: u64,
 
+    /// Enable a small loopback-only HTTP server that accepts
+    /// browser-side signal reports from the companion extension.
+    /// These signals do not replace `/proc` discovery; they only add
+    /// conservative vetoes such as "a browser window is focused" or
+    /// "there is audible/playing media right now".
+    #[serde(default = "default_signal_server_enabled")]
+    pub signal_server_enabled: bool,
+
+    /// Loopback bind address for the browser signal server.
+    /// Default: `127.0.0.1:7879`.
+    #[serde(default = "default_signal_server_bind")]
+    pub signal_server_bind: String,
+
+    /// How long a browser signal report stays authoritative before the
+    /// daemon ignores it and falls back to `/proc`-only behavior.
+    /// Default: 45 seconds.
+    #[serde(default = "default_signal_ttl_secs")]
+    pub signal_ttl_secs: u64,
+
+    /// If the extension reports a recent user interaction newer than
+    /// this threshold, the daemon will temporarily veto compression for
+    /// the matching browser family. Default: 90 seconds.
+    #[serde(default = "default_signal_interaction_grace_secs")]
+    pub signal_interaction_grace_secs: u64,
+
     /// Browser/app profiles used by the scanner. Each profile is a
     /// declarative cmdline-match rule. Defaults to a built-in set covering
     /// Firefox-family + Chromium-family + Electron apps. Users can replace
@@ -119,6 +144,10 @@ impl Default for Config {
             psi_window_us: default_psi_window_us(),
             cn_proc_reseed_every_n_cycles: default_cn_proc_reseed(),
             enable_bpf_cpu_tracker: default_bpf_enabled(),
+            signal_server_enabled: default_signal_server_enabled(),
+            signal_server_bind: default_signal_server_bind(),
+            signal_ttl_secs: default_signal_ttl_secs(),
+            signal_interaction_grace_secs: default_signal_interaction_grace_secs(),
             profiles: default_profiles(),
         }
     }
@@ -146,6 +175,22 @@ fn default_cn_proc_reseed() -> u64 {
 
 fn default_bpf_enabled() -> bool {
     false
+}
+
+fn default_signal_server_enabled() -> bool {
+    false
+}
+
+fn default_signal_server_bind() -> String {
+    "127.0.0.1:7879".into()
+}
+
+fn default_signal_ttl_secs() -> u64 {
+    45
+}
+
+fn default_signal_interaction_grace_secs() -> u64 {
+    90
 }
 
 impl Config {
@@ -183,6 +228,13 @@ mod tests {
         assert_eq!(
             parsed.telemetry_interval_cycles,
             defaults.telemetry_interval_cycles,
+        );
+        assert_eq!(parsed.signal_server_enabled, defaults.signal_server_enabled);
+        assert_eq!(parsed.signal_server_bind, defaults.signal_server_bind);
+        assert_eq!(parsed.signal_ttl_secs, defaults.signal_ttl_secs);
+        assert_eq!(
+            parsed.signal_interaction_grace_secs,
+            defaults.signal_interaction_grace_secs,
         );
         assert_eq!(parsed.profiles.len(), defaults.profiles.len());
     }

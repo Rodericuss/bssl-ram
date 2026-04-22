@@ -5,6 +5,7 @@ mod proc_connector;
 mod process_table;
 mod psi;
 mod scanner;
+mod signals;
 mod state;
 mod telemetry;
 mod zram;
@@ -14,6 +15,7 @@ use compressor::{compress_pid, read_proc_stats, rss_mib};
 use config::Config;
 use process_table::ProcessTable;
 use scanner::{scan_targets, TargetProcess};
+use signals::SignalStore;
 use state::{CpuTracker, ProcSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +38,8 @@ async fn main() -> Result<()> {
         min_rss_mib = config.min_rss_mib,
         telemetry_interval_cycles = config.telemetry_interval_cycles,
         dry_run = config.dry_run,
+        signal_server_enabled = config.signal_server_enabled,
+        signal_server_bind = %config.signal_server_bind,
         "bssl-ram starting"
     );
     info!(
@@ -131,6 +135,37 @@ async fn main() -> Result<()> {
         false
     };
 
+    let signal_store = if config.signal_server_enabled {
+        match signals::spawn_server(
+            &config.signal_server_bind,
+            Duration::from_secs(config.signal_ttl_secs),
+            Duration::from_secs(config.signal_interaction_grace_secs),
+        )
+        .await
+        {
+            Ok(store) => {
+                info!(
+                    bind = %config.signal_server_bind,
+                    ttl_secs = config.signal_ttl_secs,
+                    interaction_grace_secs = config.signal_interaction_grace_secs,
+                    "browser signal server active"
+                );
+                Some(store)
+            }
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    bind = %config.signal_server_bind,
+                    "browser signal server unavailable — staying on /proc-only heuristics",
+                );
+                None
+            }
+        }
+    } else {
+        info!("browser signal server disabled by config");
+        None
+    };
+
     let mut tracker = CpuTracker::new();
     let stats = Stats::default();
     let mut cycle: u64 = 0;
@@ -161,7 +196,18 @@ async fn main() -> Result<()> {
                 }
 
                 let targets = collect_targets(&process_table, &config);
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::Timer, &targets, &bpf_tracker);
+                scan_cycle(
+                    &config,
+                    &mut tracker,
+                    &stats,
+                    cycle,
+                    ScanTrigger::Timer,
+                    &targets,
+                    ScanRuntime {
+                        bpf_tracker: &bpf_tracker,
+                        signal_store: &signal_store,
+                    },
+                );
 
                 // Smoke test: peek at the BPF map for our own PID so the
                 // operator sees in the journal that the kernel is updating
@@ -188,7 +234,18 @@ async fn main() -> Result<()> {
                     );
                 }
                 let targets = collect_targets(&process_table, &config);
-                scan_cycle(&config, &mut tracker, &stats, cycle, ScanTrigger::PsiPressure, &targets, &bpf_tracker);
+                scan_cycle(
+                    &config,
+                    &mut tracker,
+                    &stats,
+                    cycle,
+                    ScanTrigger::PsiPressure,
+                    &targets,
+                    ScanRuntime {
+                        bpf_tracker: &bpf_tracker,
+                        signal_store: &signal_store,
+                    },
+                );
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received — shutting down gracefully");
@@ -211,6 +268,7 @@ async fn main() -> Result<()> {
         psi_active,
         cn_proc_active = process_table.is_some(),
         bpf_active = bpf_tracker.is_some(),
+        signal_server_active = signal_store.is_some(),
         "daemon stopping"
     );
     Ok(())
@@ -319,7 +377,7 @@ fn scan_cycle(
     cycle: u64,
     trigger: ScanTrigger,
     targets: &[TargetProcess],
-    bpf_tracker: &Option<bpf_cpu_tracker::BpfCpuTracker>,
+    runtime: ScanRuntime<'_>,
 ) {
     let started = Instant::now();
 
@@ -371,11 +429,11 @@ fn scan_cycle(
         // we read both starttime and cpu_ns straight from kernel maps —
         // zero /proc syscalls in the hot path. Otherwise we fall back to
         // /proc/PID/stat and convert ticks → ns at the boundary.
-        let snap = match build_snapshot(pid, bpf_tracker) {
+        let snap = match build_snapshot(pid, runtime.bpf_tracker) {
             Some(s) => s,
             None => {
                 tracker.remove(pid);
-                if let Some(b) = &bpf_tracker {
+                if let Some(b) = runtime.bpf_tracker {
                     b.forget(pid);
                 }
                 debug!(
@@ -444,6 +502,22 @@ fn scan_cycle(
                 "rss below floor"
             );
             continue;
+        }
+
+        if let Some(store) = runtime.signal_store {
+            if let Some(veto) = store.profile_veto(profile) {
+                stats.inc(&stats.skips_browser_signals);
+                info!(
+                    pid,
+                    profile,
+                    action = "skip",
+                    reason = "browser-signals",
+                    signal_reason = veto.reason,
+                    signal_detail = %veto.detail,
+                    "browser-side signal vetoed compression",
+                );
+                continue;
+            }
         }
 
         match compress_pid(pid, config.dry_run) {
@@ -545,4 +619,10 @@ fn scan_cycle(
         tracked_pids = post,
         "running totals"
     );
+}
+
+#[derive(Clone, Copy)]
+struct ScanRuntime<'a> {
+    bpf_tracker: &'a Option<bpf_cpu_tracker::BpfCpuTracker>,
+    signal_store: &'a Option<Arc<SignalStore>>,
 }
