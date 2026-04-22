@@ -1,7 +1,7 @@
 name: Bug report
 description: Something in bssl-ram behaves incorrectly.
 title: "bug: <short summary>"
-labels: ["bug", "triage"]
+labels: [ "bug", "triage" ]
 body:
   - type: markdown
     attributes:

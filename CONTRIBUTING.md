@@ -52,14 +52,14 @@ Participation means you agree to uphold it.
 
 ## Ways to contribute
 
-| Type                   | How it gets in                                                       |
-|:-----------------------|:---------------------------------------------------------------------|
-| Bug report             | Open an issue using the **Bug report** template.                     |
-| Performance regression | Use the **Performance regression** template. Include before/after numbers. |
-| New app profile        | Use the **Profile request** template *or* open a PR with the rule + a reproduction. |
+| Type                   | How it gets in                                                                                          |
+|:-----------------------|:--------------------------------------------------------------------------------------------------------|
+| Bug report             | Open an issue using the **Bug report** template.                                                        |
+| Performance regression | Use the **Performance regression** template. Include before/after numbers.                              |
+| New app profile        | Use the **Profile request** template *or* open a PR with the rule + a reproduction.                     |
 | Feature proposal       | Open a **Feature request** issue first — don't start coding a 500-line PR before the design discussion. |
-| Docs / typos           | Straight PR, no issue needed.                                        |
-| Kernel-side tips       | Welcome as README additions or linked documents. Don't ship patches against the kernel from here. |
+| Docs / typos           | Straight PR, no issue needed.                                                                           |
+| Kernel-side tips       | Welcome as README additions or linked documents. Don't ship patches against the kernel from here.       |
 
 ## Development environment
 

@@ -1,7 +1,7 @@
 name: Performance regression
 description: A previously-fast path got slower, or memory savings dropped.
 title: "perf: <short summary>"
-labels: ["performance", "regression", "triage"]
+labels: [ "performance", "regression", "triage" ]
 body:
   - type: markdown
     attributes:

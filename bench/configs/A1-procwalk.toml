@@ -7,12 +7,12 @@
 #
 # Used by scripts/bench-cpu.sh.
 
-scan_interval_secs    = 2
+scan_interval_secs = 2
 idle_cycles_threshold = 9999      # huge — never compresses anything
-cpu_delta_threshold   = 2
+cpu_delta_threshold = 2
 wakeup_delta_threshold = 50
-min_rss_mib           = 50
-dry_run               = true      # no syscall churn between rounds
+min_rss_mib = 50
+dry_run = true      # no syscall churn between rounds
 telemetry_interval_cycles = 0
-psi_enabled           = false
+psi_enabled = false
 enable_bpf_cpu_tracker = false

@@ -23,10 +23,10 @@ This document covers:
 
 Only the latest tagged release on `main` receives security fixes.
 
-| Version  | Supported         |
-|:---------|:------------------|
-| `0.3.x`  | ✅ current         |
-| `< 0.3`  | ❌ upgrade please  |
+| Version | Supported        |
+|:--------|:-----------------|
+| `0.3.x` | ✅ current        |
+| `< 0.3` | ❌ upgrade please |
 
 If your distro packages an older version, ping your packager — we don't
 backport.

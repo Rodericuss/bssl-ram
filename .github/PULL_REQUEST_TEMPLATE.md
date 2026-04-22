@@ -65,7 +65,7 @@ cargo test
 - [ ] `cargo run --example cpu_test` shows realistic deltas.
 - [ ] `cargo run --example compress_test` parses smaps correctly.
 - [ ] `sudo ./target/debug/examples/compress_real` shows sane before/after
-      RSS / PSS / swap.
+  RSS / PSS / swap.
 
 **Host / kernel / zram:**
 
@@ -122,4 +122,4 @@ cargo test
 - [ ] Docs / README / CONTRIBUTING updated if user-visible behavior changed.
 - [ ] No secrets, no machine-specific paths, no personal IDs in the diff.
 - [ ] I've re-read the diff with `git diff --stat` and it's the minimum
-      needed to achieve the goal.
+  needed to achieve the goal.

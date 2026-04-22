@@ -1,7 +1,7 @@
 name: App profile request
 description: Ask for bssl-ram to recognize (or correctly exclude) a specific app.
 title: "profile: <app name>"
-labels: ["profile", "triage"]
+labels: [ "profile", "triage" ]
 body:
   - type: markdown
     attributes:

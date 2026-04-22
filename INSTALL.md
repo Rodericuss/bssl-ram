@@ -139,16 +139,16 @@ Chromium:
 
 Options page rows should all be populated:
 
-| Row                | Expected                                           |
-|:-------------------|:---------------------------------------------------|
-| Status             | reachable (green)                                  |
-| Protocol           | v1                                                 |
-| Accepted families  | firefox, chromium                                  |
-| Max report         | ~1024 KiB                                          |
-| Transport          | native-messaging-uds                               |
-| Bridge             | `0.1.0` (or whatever you built)                    |
-| Instance ID        | a UUID                                             |
-| Last failure       | never                                              |
+| Row               | Expected                        |
+|:------------------|:--------------------------------|
+| Status            | reachable (green)               |
+| Protocol          | v1                              |
+| Accepted families | firefox, chromium               |
+| Max report        | ~1024 KiB                       |
+| Transport         | native-messaging-uds            |
+| Bridge            | `0.1.0` (or whatever you built) |
+| Instance ID       | a UUID                          |
+| Last failure      | never                           |
 
 Daemon log should show `browser signal report accepted` lines a few
 seconds after loading the extension. Compression decisions that hit

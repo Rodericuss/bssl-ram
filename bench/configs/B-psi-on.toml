@@ -6,14 +6,14 @@
 # memory stall accumulates inside any 1s window" — sensitive enough
 # to catch the 14 GiB Python allocation in the runner script.
 
-scan_interval_secs    = 60
+scan_interval_secs = 60
 idle_cycles_threshold = 1
-cpu_delta_threshold   = 2
+cpu_delta_threshold = 2
 wakeup_delta_threshold = 50
-min_rss_mib           = 50
-dry_run               = false      # we WANT to compress under pressure
+min_rss_mib = 50
+dry_run = false      # we WANT to compress under pressure
 telemetry_interval_cycles = 0
-psi_enabled           = true
+psi_enabled = true
 psi_stall_threshold_us = 50000
-psi_window_us         = 1000000
+psi_window_us = 1000000
 enable_bpf_cpu_tracker = true

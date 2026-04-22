@@ -25,7 +25,8 @@
 noticing.**
 > Out of the box it covers Firefox, LibreWolf, Zen, Waterfox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Discord,
 > Slack, VS Code, Spotify, Obsidian and basically any other Electron-based desktop app. It doesn't restart, discard, or
-> reload anything. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back, the
+> reload anything. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back,
+> the
 > kernel decompresses transparently on page fault. The app never learns this happened.
 
 ---
@@ -110,7 +111,12 @@ flowchart LR
     ZRAM -. user clicks tab .-> FAULT
 ```
 
-The daemon is driven by a **cn_proc netlink subscription** (the process table is maintained in-memory from kernel fork/exec/exit events — the per-cycle `/proc` walk is gone) plus a single Tokio loop with **two wake sources**: a safety-net timer (`scan_interval_secs`) and an event-driven PSI memory-pressure trigger. When the system is comfortable, the daemon idles between timer ticks and burns essentially zero CPU. When the kernel reports real memory stall (`/proc/pressure/memory` crosses the configured threshold), `poll(POLLPRI)` fires and the daemon scans immediately — no waiting for the next tick. Every `scan_interval_secs` it:
+The daemon is driven by a **cn_proc netlink subscription** (the process table is maintained in-memory from kernel
+fork/exec/exit events — the per-cycle `/proc` walk is gone) plus a single Tokio loop with **two wake sources**: a
+safety-net timer (`scan_interval_secs`) and an event-driven PSI memory-pressure trigger. When the system is comfortable,
+the daemon idles between timer ticks and burns essentially zero CPU. When the kernel reports real memory stall (
+`/proc/pressure/memory` crosses the configured threshold), `poll(POLLPRI)` fires and the daemon scans immediately — no
+waiting for the next tick. Every `scan_interval_secs` it:
 
 1. Walks `/proc` and matches each cmdline against the configured **profiles**. Firefox tabs use `-isForBrowser ... tab`;
    everything Chromium-based (Chrome, Brave, Edge, Vivaldi, Opera, *and* every Electron app) carries `--type=renderer`.
@@ -133,12 +139,12 @@ Numbers from the reproducible suite under [`bench/`](./bench/) on a
 Full report with plots, methodology, raw runs and statistical
 aggregation: [**`bench/REPORT.md`**](./bench/REPORT.md).
 
-| Test | Metric | v0.3.0 | vs baseline |
-|:--|:--|---:|---:|
-| **A** Daemon CPU (300 s window) | average % | **0.080 %** | −14 % vs `/proc` walk |
-| **B** PSI reaction under 14 GiB pressure | first compress | **3.4 s** \* | **5 ×** faster than 10 s timer |
-| **C** Real compression — largest renderer | RSS drop / time | **−109 MiB (−36 %) in 398 ms** | 669 regions, 1 batch |
-| **E** Recompression cascade (aggressive 90 s) | rate | **0.0 %** | 33 % → 0 % vs v0.1.x |
+| Test                                          | Metric          |                         v0.3.0 |                    vs baseline |
+|:----------------------------------------------|:----------------|-------------------------------:|-------------------------------:|
+| **A** Daemon CPU (300 s window)               | average %       |                    **0.080 %** |          −14 % vs `/proc` walk |
+| **B** PSI reaction under 14 GiB pressure      | first compress  |                   **3.4 s** \* | **5 ×** faster than 10 s timer |
+| **C** Real compression — largest renderer     | RSS drop / time | **−109 MiB (−36 %) in 398 ms** |           669 regions, 1 batch |
+| **E** Recompression cascade (aggressive 90 s) | rate            |                      **0.0 %** |           33 % → 0 % vs v0.1.x |
 
 \* *Dominated by the Python allocation ramp; kernel→daemon latency once
 PSI fires is sub-millisecond.*
@@ -183,9 +189,9 @@ dry_run = false
 # (granted by the systemd unit). On any failure (kernel without
 # CONFIG_PSI, missing cap, …) the daemon logs a warning and silently
 # falls back to timer-only mode.
-psi_enabled            = true
+psi_enabled = true
 psi_stall_threshold_us = 150000   # 150 ms of "some-tasks-stalled"
-psi_window_us          = 1000000  # ... within any 1 s window
+psi_window_us = 1000000  # ... within any 1 s window
 
 # Profiles are how the scanner decides what counts as a "compressible
 # target". The defaults below cover Firefox-family + Chromium-family +
@@ -243,11 +249,14 @@ sudo ./target/debug/examples/compress_real
 
 ## 🚀 Push it further — kernel-side free wins
 
-bssl-ram doesn't replace what the kernel already does well; it stacks on top. Two zero-code knobs amplify everything the daemon does.
+bssl-ram doesn't replace what the kernel already does well; it stacks on top. Two zero-code knobs amplify everything the
+daemon does.
 
 ### MGLRU (Multi-Generational LRU) — better aging, less kswapd
 
-Linux 6.1+ ships an alternative page-reclaim algorithm that uses generations instead of the binary active/inactive lists. Google's fleet data: **40% less kswapd CPU, 85% fewer low-memory kills at the 75th percentile**. It's compiled in but disabled by default on most distros.
+Linux 6.1+ ships an alternative page-reclaim algorithm that uses generations instead of the binary active/inactive
+lists. Google's fleet data: **40% less kswapd CPU, 85% fewer low-memory kills at the 75th percentile**. It's compiled in
+but disabled by default on most distros.
 
 ```bash
 # Enable all three components (base + leaf-PTE + non-leaf-PTE access bit clearing)
@@ -260,11 +269,14 @@ echo 1000 | sudo tee /sys/kernel/mm/lru_gen/min_ttl_ms
 cat /sys/kernel/mm/lru_gen/enabled    # should print 0x0007
 ```
 
-Persist across boots via a systemd-tmpfiles drop-in or sysfs.d snippet. Reference: [`Documentation/admin-guide/mm/multigen_lru.rst`](https://docs.kernel.org/admin-guide/mm/multigen_lru.html).
+Persist across boots via a systemd-tmpfiles drop-in or sysfs.d snippet. Reference: [
+`Documentation/admin-guide/mm/multigen_lru.rst`](https://docs.kernel.org/admin-guide/mm/multigen_lru.html).
 
 ### zram multi-algorithm + recompression — squeeze the last drops
 
-Default zram uses one fast algorithm (zstd or lz4). You can stack a fast primary for write latency with a slow-but-strong secondary for already-cold pages — typical result is **4–5× compression ratio** instead of the usual 2–3×.
+Default zram uses one fast algorithm (zstd or lz4). You can stack a fast primary for write latency with a
+slow-but-strong secondary for already-cold pages — typical result is **4–5× compression ratio** instead of the usual
+2–3×.
 
 ```ini
 # /etc/systemd/zram-generator.conf
@@ -275,9 +287,12 @@ compression-algorithm = lzo-rle zstd(level=15)
 # writeback-device = /dev/disk/by-id/<your-nvme>-partN
 ```
 
-Then a tiny script re-compresses idle pages with the secondary algorithm in the background. Reference: [systemd-zram-generator multi-comp recipe](https://gist.github.com/Szpadel/9a1960e52121e798a240a9b320ec13c8) and [`Documentation/admin-guide/blockdev/zram.rst`](https://docs.kernel.org/admin-guide/blockdev/zram.html).
+Then a tiny script re-compresses idle pages with the secondary algorithm in the background.
+Reference: [systemd-zram-generator multi-comp recipe](https://gist.github.com/Szpadel/9a1960e52121e798a240a9b320ec13c8)
+and [`Documentation/admin-guide/blockdev/zram.rst`](https://docs.kernel.org/admin-guide/blockdev/zram.html).
 
-These two changes together stretch the daemon's per-page payoff: you compress more bytes per RAM byte saved, evicted pages stay accurate to the actual working set, and the kernel does less hot-path work to keep up.
+These two changes together stretch the daemon's per-page payoff: you compress more bytes per RAM byte saved, evicted
+pages stay accurate to the actual working set, and the kernel does less hot-path work to keep up.
 
 ---
 

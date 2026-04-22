@@ -14,11 +14,11 @@ Aggregated across 1 run(s).
   <img alt="Bar chart: daemon CPU % per discovery mode" src="results/plots/test-a-cpu-light.png">
 </picture>
 
-| Config | Runs | Mean CPU % | Std-dev | Min % | Max % |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| A1-procwalk | 1 | 0.0933 | — | 0.0933 | 0.0933 |
-| A2-cnproc | 1 | 0.0833 | — | 0.0833 | 0.0833 |
-| A3-cnproc-bpf | 1 | 0.0800 | — | 0.0800 | 0.0800 |
+| Config        | Runs | Mean CPU % | Std-dev |  Min % |  Max % |
+|:--------------|-----:|-----------:|--------:|-------:|-------:|
+| A1-procwalk   |    1 |     0.0933 |       — | 0.0933 | 0.0933 |
+| A2-cnproc     |    1 |     0.0833 |       — | 0.0833 | 0.0833 |
+| A3-cnproc-bpf |    1 |     0.0800 |       — | 0.0800 | 0.0800 |
 
 ## Test B — PSI reaction latency under 14 GiB allocation
 
@@ -27,10 +27,10 @@ Aggregated across 1 run(s).
   <img alt="Bar chart: PSI on vs timer-only reaction time" src="results/plots/test-b-psi-latency-light.png">
 </picture>
 
-| Mode | Runs | Mean ms | Std-dev | Min ms | Max ms |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| B-psi-off-timer | 1 | 17041 | — | 17041 | 17041 |
-| B-psi-on | 1 | 3402 | — | 3402 | 3402 |
+| Mode            | Runs | Mean ms | Std-dev | Min ms | Max ms |
+|:----------------|-----:|--------:|--------:|-------:|-------:|
+| B-psi-off-timer |    1 |   17041 |       — |  17041 |  17041 |
+| B-psi-on        |    1 |    3402 |       — |   3402 |   3402 |
 
 ## Test C — real compression on largest renderer
 
@@ -39,9 +39,9 @@ Aggregated across 1 run(s).
   <img alt="RSS before/after compression of the largest renderer" src="results/plots/test-c-rss-before-after-light.png">
 </picture>
 
-| Run | Before MiB | After MiB | Δ MiB | Δ % | Syscall ms |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| 20260422-183001 | 300 | 191 | 109 | 36.3% | 398 |
+| Run             | Before MiB | After MiB | Δ MiB |   Δ % | Syscall ms |
+|:----------------|-----------:|----------:|------:|------:|-----------:|
+| 20260422-183001 |        300 |       191 |   109 | 36.3% |        398 |
 
 ## Test E — recompression cascade prevention
 
@@ -50,9 +50,9 @@ Aggregated across 1 run(s).
   <img alt="Unique compressions vs recompressions over a 90s aggressive window" src="results/plots/test-e-recompression-light.png">
 </picture>
 
-| Run | Total events | Unique PIDs | Recompressions | Rate % |
-| :--- | ---: | ---: | ---: | ---: |
-| 20260422-182823 | 14 | 14 | 0 | 0.0% |
+| Run             | Total events | Unique PIDs | Recompressions | Rate % |
+|:----------------|-------------:|------------:|---------------:|-------:|
+| 20260422-182823 |           14 |          14 |              0 |   0.0% |
 
 ## Plots
 

@@ -3,12 +3,12 @@
 # Latency under pressure = the gap between the stress starting and the
 # next timer tick (worst case = scan_interval, average = scan_interval/2).
 
-scan_interval_secs    = 10
+scan_interval_secs = 10
 idle_cycles_threshold = 1
-cpu_delta_threshold   = 2
+cpu_delta_threshold = 2
 wakeup_delta_threshold = 50
-min_rss_mib           = 50
-dry_run               = false
+min_rss_mib = 50
+dry_run = false
 telemetry_interval_cycles = 0
-psi_enabled           = false
+psi_enabled = false
 enable_bpf_cpu_tracker = true

@@ -5,12 +5,12 @@
 # both per-task CPU runtime and start_time, so /proc/PID/stat is
 # bypassed in the hot path.
 
-scan_interval_secs    = 2
+scan_interval_secs = 2
 idle_cycles_threshold = 9999
-cpu_delta_threshold   = 2
+cpu_delta_threshold = 2
 wakeup_delta_threshold = 50
-min_rss_mib           = 50
-dry_run               = true
+min_rss_mib = 50
+dry_run = true
 telemetry_interval_cycles = 0
-psi_enabled           = false      # PSI is its own benchmark (Test B)
+psi_enabled = false      # PSI is its own benchmark (Test B)
 enable_bpf_cpu_tracker = true
