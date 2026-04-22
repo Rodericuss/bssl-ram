@@ -195,7 +195,12 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
         }
 
         match compress_pid(pid, config.dry_run) {
-            Ok(outcome) => {
+            Ok(outcome) if outcome.is_real_success() => {
+                // Only NOW set the anti-recompression flag. If we set it on
+                // every Ok we'd silence retries after a partial/total
+                // syscall failure (ENOSYS, EPERM, ESRCH on non-x86_64
+                // builds, …) and the daemon would look healthy while
+                // doing nothing.
                 tracker.mark_compressed(pid);
                 stats.inc(&stats.compressions);
                 stats.add(&stats.bytes_paged_out, outcome.bytes_advised);
@@ -213,8 +218,40 @@ fn scan_cycle(config: &Config, tracker: &mut CpuTracker, stats: &Stats, cycle: u
                     bytes_advised_mib = outcome.bytes_advised / 1024 / 1024,
                     bytes_skipped_mib = outcome.bytes_skipped_by_kernel / 1024 / 1024,
                     batches = outcome.batches,
-                    dry_run = config.dry_run,
                     "page-out done"
+                );
+            }
+            Ok(outcome) if outcome.was_dry_run => {
+                // Dry-run does NOT mutate the tracker — the next cycle
+                // should re-evaluate (and re-log) the same PID instead of
+                // silently being marked "already compressed" and skipped.
+                info!(
+                    pid,
+                    profile,
+                    action = "would-compress",
+                    reason = "dry-run",
+                    rss_mib = rss,
+                    regions = outcome.regions,
+                    "dry-run: would page out (no syscall issued)"
+                );
+            }
+            Ok(outcome) => {
+                // Real call but partial or total batch failure. Don't
+                // mark compressed — leave the door open for the next
+                // idle cycle to retry once whatever the kernel objected
+                // to is gone.
+                stats.inc(&stats.errors);
+                warn!(
+                    pid,
+                    profile,
+                    action = "compress-incomplete",
+                    reason = "partial-batch-failure",
+                    rss_mib = rss,
+                    regions = outcome.regions,
+                    bytes_advised_mib = outcome.bytes_advised / 1024 / 1024,
+                    batches = outcome.batches,
+                    batches_failed = outcome.batches_failed,
+                    "process_madvise rejected one or more batches — not marking as compressed",
                 );
             }
             Err(e) => {

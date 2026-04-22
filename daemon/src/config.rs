@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct Config {
     /// How many consecutive idle cycles before compressing a process.
     /// Each cycle is scan_interval_secs long.
@@ -72,5 +73,42 @@ impl Config {
         } else {
             Ok(Self::default())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_config_uses_defaults_for_missing_fields() {
+        // Council-flagged regression: previously a config containing only
+        // some of the fields blew up at startup with `missing field
+        // idle_cycles_threshold`, contradicting the README which promises
+        // every field is optional. Struct-level `#[serde(default)]` plus
+        // `impl Default` make this work: the present fields override the
+        // defaults, the missing ones inherit.
+        let parsed: Config = toml::from_str("dry_run = true\n").expect("partial config must parse");
+        let defaults = Config::default();
+
+        assert!(parsed.dry_run);
+        assert_eq!(parsed.idle_cycles_threshold, defaults.idle_cycles_threshold);
+        assert_eq!(parsed.scan_interval_secs, defaults.scan_interval_secs);
+        assert_eq!(parsed.cpu_delta_threshold, defaults.cpu_delta_threshold);
+        assert_eq!(parsed.min_rss_mib, defaults.min_rss_mib);
+        assert_eq!(
+            parsed.telemetry_interval_cycles,
+            defaults.telemetry_interval_cycles,
+        );
+        assert_eq!(parsed.profiles.len(), defaults.profiles.len());
+    }
+
+    #[test]
+    fn empty_config_parses_to_defaults() {
+        let parsed: Config = toml::from_str("").expect("empty config must parse");
+        let defaults = Config::default();
+        assert_eq!(parsed.idle_cycles_threshold, defaults.idle_cycles_threshold);
+        assert_eq!(parsed.scan_interval_secs, defaults.scan_interval_secs);
+        assert!(!parsed.dry_run);
     }
 }

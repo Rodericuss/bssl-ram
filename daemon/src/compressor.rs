@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
-use libc::{c_int, c_long, iovec};
+use libc::{c_int, iovec};
 use std::fs;
 use tracing::{debug, warn};
 
-// process_madvise syscall number on x86_64 Linux (kernel >= 5.10)
-const SYS_PROCESS_MADVISE: c_long = 440;
-const MADV_PAGEOUT: c_int = 21;
+// Resolve the syscall number through libc so non-x86_64 builds (ARM64,
+// RISC-V, MIPS, …) get the right value for their ABI. Same for the
+// MADV_PAGEOUT constant — both have been in libc since 0.2.94 / 0.2.105.
+const SYS_PROCESS_MADVISE: libc::c_long = libc::SYS_process_madvise;
+const MADV_PAGEOUT: c_int = libc::MADV_PAGEOUT;
 
 // Maximum iovecs per process_madvise call (POSIX IOV_MAX, queried via
 // `getconf IOV_MAX`). Linux pins this at 1024. Batching up to this many
@@ -125,7 +127,13 @@ pub fn rss_mib(pid: u32) -> u64 {
 /// fixtures rather than a live /proc.
 pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
     let after_comm = stat.rfind(')')?;
-    let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
+    // Defensive slicing: the API contract is `Option`, so a truncated
+    // stat ("1 (init)", "a)", ")") must return None instead of panicking
+    // on an out-of-bounds index. checked_add covers usize overflow on
+    // pathological lengths; .get() covers the short-string case.
+    let after = after_comm.checked_add(2)?;
+    let rest = stat.get(after..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
 
     // After the closing paren: state(0) ppid(1) pgrp(2) session(3)
     // tty_nr(4) tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9)
@@ -143,13 +151,32 @@ pub fn read_cpu_ticks(pid: u32) -> Option<(u64, u64)> {
     parse_cpu_ticks(&stat)
 }
 /// Outcome of a single compress_pid call. Returned so the caller can
-/// fold the numbers into telemetry without reparsing log strings.
+/// fold the numbers into telemetry and decide whether to set the
+/// anti-recompression flag without reparsing log strings.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CompressOutcome {
     pub regions: usize,
     pub bytes_advised: u64,
     pub bytes_skipped_by_kernel: u64,
     pub batches: usize,
+    /// How many of those batches the kernel rejected outright (ret < 0).
+    /// Per-region EPERM/EINVAL inside a batch returns a *partial* positive
+    /// count and is not counted here — only whole-batch syscall failures.
+    pub batches_failed: usize,
+    /// True iff the call returned without issuing any real syscall.
+    pub was_dry_run: bool,
+}
+
+impl CompressOutcome {
+    /// Returns true only when at least one real (non-dry-run) MADV_PAGEOUT
+    /// batch went through and **none** failed. The caller uses this to
+    /// decide whether to set the anti-recompression flag — partial or
+    /// total failures (ENOSYS, EPERM batch-wide, ESRCH, …) leave the
+    /// flag clear so the next idle cycle retries instead of us claiming
+    /// false success and never trying again.
+    pub fn is_real_success(&self) -> bool {
+        !self.was_dry_run && self.batches > 0 && self.batches_failed == 0
+    }
 }
 
 /// Calls process_madvise(MADV_PAGEOUT) on all anonymous regions of a process.
@@ -169,9 +196,8 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<CompressOutcome> {
     if dry_run {
         return Ok(CompressOutcome {
             regions: regions.len(),
-            bytes_advised: 0,
-            bytes_skipped_by_kernel: 0,
-            batches: 0,
+            was_dry_run: true,
+            ..CompressOutcome::default()
         });
     }
 
@@ -191,7 +217,8 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<CompressOutcome> {
 
     let total_requested: usize = regions.iter().map(|(_, s)| *s).sum();
     let mut bytes_advised: usize = 0;
-    let mut chunks_done = 0usize;
+    let mut batches_done = 0usize;
+    let mut batches_failed = 0usize;
 
     for chunk in iovs.chunks(IOV_MAX) {
         let ret = unsafe {
@@ -214,14 +241,15 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<CompressOutcome> {
             warn!(
                 "process_madvise batch failed for pid {} chunk {} ({} iovecs): {}",
                 pid,
-                chunks_done,
+                batches_done,
                 chunk.len(),
                 err
             );
+            batches_failed += 1;
         } else {
             bytes_advised += ret as usize;
         }
-        chunks_done += 1;
+        batches_done += 1;
     }
 
     unsafe { libc::close(pidfd) };
@@ -231,7 +259,9 @@ pub fn compress_pid(pid: u32, dry_run: bool) -> Result<CompressOutcome> {
         regions: regions.len(),
         bytes_advised: bytes_advised as u64,
         bytes_skipped_by_kernel: skipped as u64,
-        batches: chunks_done,
+        batches: batches_done,
+        batches_failed,
+        was_dry_run: false,
     })
 }
 
@@ -268,6 +298,62 @@ mod tests {
         assert_eq!(parse_cpu_ticks("no parens here"), None);
         // Truncated stat with no utime field
         assert_eq!(parse_cpu_ticks("1 (init) S 0 1 1"), None);
+    }
+
+    #[test]
+    fn parse_cpu_ticks_does_not_panic_on_short_input() {
+        // Council-flagged crash path: the slice `stat[after_comm + 2..]`
+        // used to panic for inputs where `after_comm + 2` runs past the
+        // end of the string. Pin every short variant to None so any
+        // future regression to direct slicing fails the suite.
+        for s in [")", "a)", "1 (init)", "(()", "(x)y"] {
+            assert_eq!(
+                parse_cpu_ticks(s),
+                None,
+                "parse_cpu_ticks({s:?}) should return None, not panic",
+            );
+        }
+    }
+
+    #[test]
+    fn compress_outcome_is_real_success_only_for_real_full_pageouts() {
+        // dry-run: never a real success, even if "regions" looks healthy
+        let o = CompressOutcome {
+            regions: 100,
+            was_dry_run: true,
+            ..CompressOutcome::default()
+        };
+        assert!(!o.is_real_success());
+
+        // partial failure: at least one batch ENOSYS/EPERM → not a success
+        let o = CompressOutcome {
+            regions: 100,
+            bytes_advised: 1024,
+            batches: 4,
+            batches_failed: 1,
+            ..CompressOutcome::default()
+        };
+        assert!(!o.is_real_success());
+
+        // total failure: all batches rejected, zero bytes → not a success
+        let o = CompressOutcome {
+            regions: 100,
+            batches: 3,
+            batches_failed: 3,
+            ..CompressOutcome::default()
+        };
+        assert!(!o.is_real_success());
+
+        // happy path: real call, every batch through, nothing failed
+        let o = CompressOutcome {
+            regions: 100,
+            bytes_advised: 16 * 1024 * 1024,
+            batches: 3,
+            batches_failed: 0,
+            was_dry_run: false,
+            ..CompressOutcome::default()
+        };
+        assert!(o.is_real_success());
     }
 
     #[test]

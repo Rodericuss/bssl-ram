@@ -17,9 +17,11 @@ use libc::{c_int, c_long, iovec};
 use std::fs;
 use std::time::Instant;
 
-const SYS_PROCESS_MADVISE: c_long = 440;
+// Same portability fix as compressor.rs: pull syscall numbers from libc
+// instead of hardcoding x86_64 values.
+const SYS_PROCESS_MADVISE: c_long = libc::SYS_process_madvise;
 const SYS_PIDFD_OPEN: c_long = libc::SYS_pidfd_open;
-const MADV_COLD: c_int = 20;
+const MADV_COLD: c_int = libc::MADV_COLD;
 const IOV_MAX: usize = 1024;
 
 fn open_pidfd(pid: u32) -> c_int {
