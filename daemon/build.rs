@@ -30,7 +30,14 @@ fn main() {
     //    keeps it out of git and makes builds reproducible per host.
     let vmlinux = out_dir.join("vmlinux.h");
     let bpftool_status = Command::new("bpftool")
-        .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "format", "c"])
+        .args([
+            "btf",
+            "dump",
+            "file",
+            "/sys/kernel/btf/vmlinux",
+            "format",
+            "c",
+        ])
         .stdout(std::fs::File::create(&vmlinux).expect("create vmlinux.h"))
         .status()
         .expect("invoke bpftool — install pacman -S bpf");
