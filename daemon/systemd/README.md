@@ -67,9 +67,9 @@ fields — grep `action=compress` to see only what the daemon **did**, or
 Two env vars control output (set via `Environment=` in a drop-in or pass
 inline when running directly):
 
-| Variable | Default | Meaning |
-|:---|:---|:---|
-| `RUST_LOG` | `info` | Standard tracing EnvFilter. e.g. `bssl_ram=debug` to see per-skip decisions, `bssl_ram::scanner=trace` for low-level. |
+| Variable          | Default  | Meaning                                                                                                                            |
+|:------------------|:---------|:-----------------------------------------------------------------------------------------------------------------------------------|
+| `RUST_LOG`        | `info`   | Standard tracing EnvFilter. e.g. `bssl_ram=debug` to see per-skip decisions, `bssl_ram::scanner=trace` for low-level.              |
 | `BSSL_LOG_FORMAT` | `pretty` | `pretty` (human, ANSI), `compact` (one-liner), or `json` (one JSON object per event — pipe to `jq` or send to Loki/Elasticsearch). |
 
 Useful one-liners:

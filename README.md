@@ -21,8 +21,12 @@
 ---
 
 > [!IMPORTANT]
-> **bssl-ram is a tiny autonomous daemon that shrinks idle browser tabs and Electron windows by ~70% RSS without the app noticing.**
-> Out of the box it covers Firefox, LibreWolf, Zen, Waterfox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Discord, Slack, VS Code, Spotify, Obsidian and basically any other Electron-based desktop app. It doesn't restart, discard, or reload anything. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back, the kernel decompresses transparently on page fault. The app never learns this happened.
+> **bssl-ram is a tiny autonomous daemon that shrinks idle browser tabs and Electron windows by ~70% RSS without the app
+noticing.**
+> Out of the box it covers Firefox, LibreWolf, Zen, Waterfox, Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Discord,
+> Slack, VS Code, Spotify, Obsidian and basically any other Electron-based desktop app. It doesn't restart, discard, or
+> reload anything. It just tells the kernel "page this out to zram — the user isn't looking". When the tab comes back, the
+> kernel decompresses transparently on page fault. The app never learns this happened.
 
 ---
 
@@ -108,11 +112,17 @@ flowchart LR
 
 The daemon is a single Tokio loop. Every `scan_interval_secs` it:
 
-1. Walks `/proc` and matches each cmdline against the configured **profiles**. Firefox tabs use `-isForBrowser ... tab`; everything Chromium-based (Chrome, Brave, Edge, Vivaldi, Opera, *and* every Electron app) carries `--type=renderer`. Extension renderers (`--extension-process`) and infrastructure procs (gpu/utility/zygote/crashpad/rdd/socket) are excluded.
-2. Reads `utime + stime` from `/proc/PID/stat` and diffs against the previous snapshot. Targets that burn ≤ 2 ticks (20ms CPU) per cycle for 3 consecutive cycles are flagged idle.
-3. Parses `/proc/PID/smaps`, selects only **private anonymous** regions (perms `p`, inode 0, `Anonymous: > 0 kB`), and batches them through `process_madvise(pidfd, iov, MADV_PAGEOUT)` in chunks of `IOV_MAX=1024`.
+1. Walks `/proc` and matches each cmdline against the configured **profiles**. Firefox tabs use `-isForBrowser ... tab`;
+   everything Chromium-based (Chrome, Brave, Edge, Vivaldi, Opera, *and* every Electron app) carries `--type=renderer`.
+   Extension renderers (`--extension-process`) and infrastructure procs (gpu/utility/zygote/crashpad/rdd/socket) are
+   excluded.
+2. Reads `utime + stime` from `/proc/PID/stat` and diffs against the previous snapshot. Targets that burn ≤ 2 ticks (
+   20ms CPU) per cycle for 3 consecutive cycles are flagged idle.
+3. Parses `/proc/PID/smaps`, selects only **private anonymous** regions (perms `p`, inode 0, `Anonymous: > 0 kB`), and
+   batches them through `process_madvise(pidfd, iov, MADV_PAGEOUT)` in chunks of `IOV_MAX=1024`.
 
-That's the whole thing. No ptrace, no signals, no process suspension. The kernel handles decompression on demand — the app doesn't know its pages moved.
+That's the whole thing. No ptrace, no signals, no process suspension. The kernel handles decompression on demand — the
+app doesn't know its pages moved.
 
 ---
 
@@ -120,14 +130,15 @@ That's the whole thing. No ptrace, no signals, no process suspension. The kernel
 
 Measured on a real Firefox tab with 588 MiB RSS, using `examples/compress_real.rs`:
 
-| Metric | Before | After | Δ |
-|:-------|-------:|------:|-----:|
-| **RSS** | 588 MiB | 171 MiB | **−417 MiB (−70%)** |
-| **PSS** | 493 MiB | 65 MiB | −428 MiB |
-| **Swap (zram)** | 3 MiB | 374 MiB | **+374 MiB** |
-| **Syscall time** | — | — | 1.38s for 1000 regions |
+| Metric           |  Before |   After |                      Δ |
+|:-----------------|--------:|--------:|-----------------------:|
+| **RSS**          | 588 MiB | 171 MiB |    **−417 MiB (−70%)** |
+| **PSS**          | 493 MiB |  65 MiB |               −428 MiB |
+| **Swap (zram)**  |   3 MiB | 374 MiB |           **+374 MiB** |
+| **Syscall time** |       — |       — | 1.38s for 1000 regions |
 
-Net physical RAM returned to the system after zstd compression: about **260 MiB** from a single tab. Firefox continued running. The tab, when switched back to, was indistinguishable from a non-compressed one.
+Net physical RAM returned to the system after zstd compression: about **260 MiB** from a single tab. Firefox continued
+running. The tab, when switched back to, was indistinguishable from a non-compressed one.
 
 ---
 
@@ -136,11 +147,11 @@ Net physical RAM returned to the system after zstd compression: about **260 MiB*
 `/etc/bssl-ram/config.toml` — all fields optional, defaults shown:
 
 ```toml
-scan_interval_secs    = 10   # seconds between /proc scans
+scan_interval_secs = 10   # seconds between /proc scans
 idle_cycles_threshold = 3    # consecutive idle cycles before compressing (3 × 10s = 30s)
-cpu_delta_threshold   = 2    # CPU ticks per cycle to be considered idle (2 ticks = 20ms)
-min_rss_mib           = 50   # don't bother compressing tiny processes
-dry_run               = false
+cpu_delta_threshold = 2    # CPU ticks per cycle to be considered idle (2 ticks = 20ms)
+min_rss_mib = 50   # don't bother compressing tiny processes
+dry_run = false
 
 # Profiles are how the scanner decides what counts as a "compressible
 # target". The defaults below cover Firefox-family + Chromium-family +
@@ -157,16 +168,17 @@ dry_run               = false
 
 ### Supported apps (built-in profiles)
 
-| Profile | Matches |
-|:---|:---|
-| `firefox` | Firefox, LibreWolf, Zen Browser, Waterfox, IceCat — any tab content process (`-isForBrowser ... tab`) |
+| Profile    | Matches                                                                                                                                                                                                                                                                                |
+|:-----------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `firefox`  | Firefox, LibreWolf, Zen Browser, Waterfox, IceCat — any tab content process (`-isForBrowser ... tab`)                                                                                                                                                                                  |
 | `chromium` | Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Yandex, Thorium, **and every Electron app** (VS Code, Discord, Slack, Spotify, Obsidian, Signal, Notion, Element, Teams, Vesktop, …) — any `--type=renderer` content process. Extension renderers (`--extension-process`) are excluded. |
 
 ---
 
 ## 🧪 Development
 
-The daemon ships with four inspection examples that bypass the main loop and let you validate each subsystem in isolation:
+The daemon ships with four inspection examples that bypass the main loop and let you validate each subsystem in
+isolation:
 
 ```bash
 # list PIDs the scanner finds — diff against `ps aux | grep isForBrowser`
@@ -186,21 +198,26 @@ sudo ./target/debug/examples/compress_real
 
 ## 📦 Requirements
 
-| Requirement | Why |
-|:---|:---|
-| Linux kernel ≥ 5.10 | `process_madvise` and `pidfd_open` syscalls |
-| zram configured as swap | Without it, pages go to disk — defeats the point |
-| `CAP_SYS_NICE` + `CAP_SYS_PTRACE` | Granted by the systemd unit or via `setcap` — no permanent root |
-| At least one supported app | Firefox, any Chromium-based browser, or any Electron app (see profile table above) |
+| Requirement                       | Why                                                                                |
+|:----------------------------------|:-----------------------------------------------------------------------------------|
+| Linux kernel ≥ 5.10               | `process_madvise` and `pidfd_open` syscalls                                        |
+| zram configured as swap           | Without it, pages go to disk — defeats the point                                   |
+| `CAP_SYS_NICE` + `CAP_SYS_PTRACE` | Granted by the systemd unit or via `setcap` — no permanent root                    |
+| At least one supported app        | Firefox, any Chromium-based browser, or any Electron app (see profile table above) |
 
 ---
 
 ## 🧯 Known limitations
 
-- **No per-tab granularity.** Browsers group same-site tabs into one process (Fission in Firefox, site-per-process in Chromium) — compressing one compresses all siblings. Acceptable since they'll all idle together.
-- **Background media detection.** A tab playing audio through MSE may show low CPU delta because the actual decoding happens in a sibling decoder process. Future work: a D-Bus MPRIS listener to globally block compression during `PlaybackStatus=Playing`.
-- **WebRTC / Meet / Zoom.** These rarely expose `MediaSession`, so MPRIS won't help. Future work: a minimal Native Messaging Host as a cooperative "please don't compress" signal from the page.
-- **Cold-start latency.** The first access after compression pays a page-fault roundtrip plus zstd decompression (sub-100ms for typical working sets — noticeable but not painful).
+- **No per-tab granularity.** Browsers group same-site tabs into one process (Fission in Firefox, site-per-process in
+  Chromium) — compressing one compresses all siblings. Acceptable since they'll all idle together.
+- **Background media detection.** A tab playing audio through MSE may show low CPU delta because the actual decoding
+  happens in a sibling decoder process. Future work: a D-Bus MPRIS listener to globally block compression during
+  `PlaybackStatus=Playing`.
+- **WebRTC / Meet / Zoom.** These rarely expose `MediaSession`, so MPRIS won't help. Future work: a minimal Native
+  Messaging Host as a cooperative "please don't compress" signal from the page.
+- **Cold-start latency.** The first access after compression pays a page-fault roundtrip plus zstd decompression (
+  sub-100ms for typical working sets — noticeable but not painful).
 
 ---
 
